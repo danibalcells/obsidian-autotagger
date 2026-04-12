@@ -29,7 +29,12 @@ export type LLMProvider = "openai" | "anthropic" | "google" | "ollama";
 
 export type NewTagsPolicy = "existing-only" | "allow-suggestions";
 
-export type BatchScope = "untagged" | "modified" | "all";
+export type BatchScope =
+  | "never-autotagged"
+  | "needs-tagging"
+  | "untagged"
+  | "modified"
+  | "all";
 
 export interface AutoTagSettings {
   enabled: boolean;
@@ -92,3 +97,8 @@ export const DEFAULT_SETTINGS: AutoTaggerSettings = {
   tagDescriptions: {},
   lastBatchRun: 0,
 };
+
+export interface PluginData {
+  settings: AutoTaggerSettings;
+  tagCache: Record<string, number>;
+}

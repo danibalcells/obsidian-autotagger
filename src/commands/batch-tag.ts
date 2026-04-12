@@ -14,9 +14,13 @@ export async function batchTag(
   entityRegistry: EntityRegistry,
   tagRegistry: TagRegistry,
   scope: BatchScope,
-  onSettingsUpdate: (lastRun: number) => Promise<void>
+  tagCache: Record<string, number>,
+  onComplete: (
+    lastRun: number,
+    cacheUpdates: Record<string, number>
+  ) => Promise<void>
 ): Promise<void> {
-  const files = getFilesForScope(app, settings, scope);
+  const files = getFilesForScope(app, settings, scope, tagCache);
   if (files.length === 0) {
     new Notice("AutoTagger: No files to process.");
     return;
@@ -38,6 +42,7 @@ export async function batchTag(
   let processed = 0;
   let skipped = 0;
   let errors = 0;
+  const cacheUpdates: Record<string, number> = {};
 
   for (let i = 0; i < files.length; i++) {
     if (cancelled) {
@@ -55,6 +60,8 @@ export async function batchTag(
       await withPreservedMtime(app, file, settings.preserveMtime, async () => {
         await mergeFrontmatter(app, file, response, entityRegistry, allowNewTags);
       });
+
+      cacheUpdates[file.path] = Date.now();
       processed++;
     } catch (err) {
       console.error(`AutoTagger: error on ${file.path}`, err);
@@ -62,14 +69,15 @@ export async function batchTag(
     }
   }
 
-  await onSettingsUpdate(Date.now());
+  await onComplete(Date.now(), cacheUpdates);
   modal.showSummary(processed, skipped, errors);
 }
 
 function getFilesForScope(
   app: App,
   settings: AutoTaggerSettings,
-  scope: BatchScope
+  scope: BatchScope,
+  tagCache: Record<string, number>
 ): TFile[] {
   const allFiles = app.vault.getMarkdownFiles();
   const { includeFolders, excludeFolders } = settings.autoTag;
@@ -87,17 +95,27 @@ function getFilesForScope(
   const filtered = allFiles.filter(inScope);
 
   switch (scope) {
-    case "untagged": {
+    case "never-autotagged":
+      return filtered.filter((f) => !(f.path in tagCache));
+
+    case "needs-tagging":
+      return filtered.filter((f) => {
+        const lastTagged = tagCache[f.path];
+        return lastTagged === undefined || f.stat.mtime > lastTagged;
+      });
+
+    case "untagged":
       return filtered.filter((f) => {
         const cache = app.metadataCache.getFileCache(f);
         const tags = cache?.frontmatter?.tags;
         return !tags || (Array.isArray(tags) && tags.length === 0);
       });
-    }
+
     case "modified": {
       const last = settings.lastBatchRun;
       return filtered.filter((f) => f.stat.mtime > last);
     }
+
     case "all":
       return filtered;
   }

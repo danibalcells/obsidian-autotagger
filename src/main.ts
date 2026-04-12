@@ -1,5 +1,5 @@
 import { Notice, Plugin } from "obsidian";
-import type { AutoTaggerSettings, BatchScope } from "./types";
+import type { AutoTaggerSettings, BatchScope, PluginData } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import { EntityRegistry } from "./registry/entity-registry";
 import { TagRegistry } from "./registry/tag-registry";
@@ -10,12 +10,13 @@ import { AutoTagger } from "./auto-tagger";
 
 export default class AutoTaggerPlugin extends Plugin {
   settings!: AutoTaggerSettings;
+  tagCache: Record<string, number> = {};
   entityRegistry!: EntityRegistry;
   tagRegistry!: TagRegistry;
   private autoTagger!: AutoTagger;
 
   async onload(): Promise<void> {
-    await this.loadSettings();
+    await this.loadData_();
 
     this.entityRegistry = new EntityRegistry();
     this.tagRegistry = new TagRegistry();
@@ -24,7 +25,12 @@ export default class AutoTaggerPlugin extends Plugin {
       this.app,
       () => this.settings,
       this.entityRegistry,
-      this.tagRegistry
+      this.tagRegistry,
+      () => this.tagCache,
+      async (path, timestamp) => {
+        this.tagCache[path] = timestamp;
+        await this.saveData_();
+      }
     );
 
     this.addSettingTab(new AutoTaggerSettingsTab(this.app, this));
@@ -42,14 +48,26 @@ export default class AutoTaggerPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "batch-tag-never-autotagged",
+      name: "Batch tag — never auto-tagged",
+      callback: () => this.runBatch("never-autotagged"),
+    });
+
+    this.addCommand({
+      id: "batch-tag-needs-tagging",
+      name: "Batch tag — never auto-tagged or changed since",
+      callback: () => this.runBatch("needs-tagging"),
+    });
+
+    this.addCommand({
       id: "batch-tag-untagged",
-      name: "Batch tag — untagged notes",
+      name: "Batch tag — no tags in frontmatter",
       callback: () => this.runBatch("untagged"),
     });
 
     this.addCommand({
       id: "batch-tag-modified",
-      name: "Batch tag — notes modified since last run",
+      name: "Batch tag — modified since last batch run",
       callback: () => this.runBatch("modified"),
     });
 
@@ -90,16 +108,27 @@ export default class AutoTaggerPlugin extends Plugin {
     }
   }
 
-  async loadSettings(): Promise<void> {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
+  async loadData_(): Promise<void> {
+    const raw = (await this.loadData()) ?? {};
+    if ("settings" in raw) {
+      // New format: { settings, tagCache }
+      const data = raw as Partial<PluginData>;
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings ?? {});
+      this.tagCache = data.tagCache ?? {};
+    } else {
+      // Legacy format: flat settings object
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+      this.tagCache = {};
+    }
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    await this.saveData_();
+  }
+
+  async saveData_(): Promise<void> {
+    const data: PluginData = { settings: this.settings, tagCache: this.tagCache };
+    await this.saveData(data);
   }
 
   private runBatch(scope: BatchScope): void {
@@ -109,13 +138,17 @@ export default class AutoTaggerPlugin extends Plugin {
       this.entityRegistry,
       this.tagRegistry,
       scope,
-      async (lastRun) => {
+      this.tagCache,
+      async (lastRun, cacheUpdates) => {
         this.settings.lastBatchRun = lastRun;
-        await this.saveSettings();
+        Object.assign(this.tagCache, cacheUpdates);
+        await this.saveData_();
       }
     ).catch((err) => {
       console.error("AutoTagger batch error:", err);
-      new Notice(`AutoTagger: Batch error — ${err instanceof Error ? err.message : String(err)}`);
+      new Notice(
+        `AutoTagger: Batch error — ${err instanceof Error ? err.message : String(err)}`
+      );
     });
   }
 }

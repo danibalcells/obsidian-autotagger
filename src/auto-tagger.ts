@@ -15,7 +15,9 @@ export class AutoTagger {
     private app: App,
     private getSettings: () => AutoTaggerSettings,
     private entityRegistry: EntityRegistry,
-    private tagRegistry: TagRegistry
+    private tagRegistry: TagRegistry,
+    private getTagCache: () => Record<string, number>,
+    private onTagged: (path: string, timestamp: number) => Promise<void>
   ) {}
 
   start(): void {
@@ -78,6 +80,11 @@ export class AutoTagger {
   }
 
   async tagFile(file: TFile): Promise<void> {
+    // Skip if already tagged after the file's last modification
+    const tagCache = this.getTagCache();
+    const lastTagged = tagCache[file.path] ?? 0;
+    if (lastTagged >= file.stat.mtime) return;
+
     const settings = this.getSettings();
     const context = {
       entities: this.entityRegistry.getEntries(),
@@ -98,5 +105,7 @@ export class AutoTagger {
         allowNewTags
       );
     });
+
+    await this.onTagged(file.path, Date.now());
   }
 }
