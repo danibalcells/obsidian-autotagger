@@ -350,8 +350,7 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("Rebuild").onClick(async () => {
           await this.plugin.rebuildRegistry();
-          btn.setButtonText("Done!");
-          setTimeout(() => btn.setButtonText("Rebuild"), 2000);
+          this.display();
         })
       );
 
