@@ -2,6 +2,54 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type AutoTaggerPlugin from "../main";
 import type { LLMProvider, NewTagsPolicy } from "../types";
 
+interface ModelOption {
+  id: string;
+  label: string;
+}
+
+const PROVIDER_MODELS: Record<LLMProvider, ModelOption[]> = {
+  openai: [
+    { id: "gpt-5.4", label: "GPT-5.4" },
+    { id: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+    { id: "gpt-5.4-nano", label: "GPT-5.4 nano" },
+    { id: "gpt-4o", label: "GPT-4o" },
+    { id: "gpt-4o-mini", label: "GPT-4o mini" },
+    { id: "custom", label: "Custom…" },
+  ],
+  anthropic: [
+    { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+    { id: "claude-3-7-sonnet-20250219", label: "Claude 3.7 Sonnet" },
+    { id: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet" },
+    { id: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
+    { id: "claude-3-opus-20240229", label: "Claude 3 Opus" },
+    { id: "custom", label: "Custom…" },
+  ],
+  google: [
+    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (preview)" },
+    { id: "gemini-3-flash-preview", label: "Gemini 3 Flash (preview)" },
+    { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite (preview)" },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+    { id: "custom", label: "Custom…" },
+  ],
+  ollama: [
+    { id: "custom", label: "Enter model name…" },
+  ],
+};
+
+const CUSTOM_SENTINEL = "custom";
+
+function resolveDropdownValue(provider: LLMProvider, modelName: string): string {
+  if (!modelName) return PROVIDER_MODELS[provider][0]?.id ?? CUSTOM_SENTINEL;
+  const known = PROVIDER_MODELS[provider].some(
+    (m) => m.id === modelName && m.id !== CUSTOM_SENTINEL
+  );
+  return known ? modelName : CUSTOM_SENTINEL;
+}
+
 export class AutoTaggerSettingsTab extends PluginSettingTab {
   constructor(app: App, private plugin: AutoTaggerPlugin) {
     super(app, plugin);
@@ -34,22 +82,19 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
         .setValue(this.plugin.settings.provider)
         .onChange(async (value) => {
           this.plugin.settings.provider = value as LLMProvider;
+          // Reset model to first option for new provider
+          const first = PROVIDER_MODELS[value as LLMProvider][0];
+          if (first && first.id !== CUSTOM_SENTINEL) {
+            this.plugin.settings.modelName = first.id;
+          } else {
+            this.plugin.settings.modelName = "";
+          }
           await this.plugin.saveSettings();
           this.display();
         })
     );
 
-    new Setting(containerEl)
-      .setName("Model name")
-      .addText((text) =>
-        text
-          .setPlaceholder(this.defaultModelName())
-          .setValue(this.plugin.settings.modelName)
-          .onChange(async (value) => {
-            this.plugin.settings.modelName = value;
-            await this.plugin.saveSettings();
-          })
-      );
+    this.renderModelSelector(containerEl);
 
     if (this.plugin.settings.provider !== "ollama") {
       new Setting(containerEl).setName("API key").addText((text) => {
@@ -111,6 +156,54 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
           }
         })
     );
+  }
+
+  private renderModelSelector(containerEl: HTMLElement): void {
+    const provider = this.plugin.settings.provider;
+    const models = PROVIDER_MODELS[provider];
+    const dropdownValue = resolveDropdownValue(provider, this.plugin.settings.modelName);
+    const isCustom = dropdownValue === CUSTOM_SENTINEL;
+
+    // Custom text input placeholder shown below the dropdown when needed
+    let customInputEl: HTMLElement | null = null;
+
+    const modelSetting = new Setting(containerEl).setName("Model");
+
+    modelSetting.addDropdown((dd) => {
+      for (const model of models) {
+        dd.addOption(model.id, model.label);
+      }
+      dd.setValue(dropdownValue);
+      dd.onChange(async (value) => {
+        if (value === CUSTOM_SENTINEL) {
+          this.plugin.settings.modelName = "";
+          await this.plugin.saveSettings();
+          if (customInputEl) customInputEl.style.display = "block";
+        } else {
+          this.plugin.settings.modelName = value;
+          await this.plugin.saveSettings();
+          if (customInputEl) customInputEl.style.display = "none";
+        }
+      });
+    });
+
+    // Custom input row — only visible when "Custom…" is selected
+    const customRow = containerEl.createEl("div");
+    customRow.style.display = isCustom ? "block" : "none";
+    customInputEl = customRow;
+
+    new Setting(customRow)
+      .setName("Custom model name")
+      .setDesc("Enter the exact API model ID.")
+      .addText((text) =>
+        text
+          .setPlaceholder(this.defaultModelPlaceholder())
+          .setValue(isCustom ? this.plugin.settings.modelName : "")
+          .onChange(async (value) => {
+            this.plugin.settings.modelName = value;
+            await this.plugin.saveSettings();
+          })
+      );
   }
 
   private renderAutoTaggingSection(): void {
@@ -261,80 +354,194 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h4", { text: "Tag descriptions" });
-    containerEl.createEl("p", {
-      text: "Add descriptions to disambiguate tags for the LLM.",
-      cls: "setting-item-description",
-    });
+    const sortedTags = [...this.plugin.tagRegistry.getEntries()].sort((a, b) =>
+      a.tag.localeCompare(b.tag)
+    );
+    const sortedEntities = [...this.plugin.entityRegistry.getEntries()].sort(
+      (a, b) => a.canonicalName.localeCompare(b.canonicalName)
+    );
 
-    for (const tagEntry of this.plugin.tagRegistry.getEntries()) {
-      new Setting(containerEl)
-        .setName(tagEntry.tag)
-        .setDesc(`Used ${tagEntry.count} time${tagEntry.count !== 1 ? "s" : ""}`)
-        .addText((text) =>
-          text
-            .setPlaceholder("Description…")
-            .setValue(this.plugin.settings.tagDescriptions[tagEntry.tag] ?? "")
-            .onChange(async (value) => {
-              if (value) {
-                this.plugin.settings.tagDescriptions[tagEntry.tag] = value;
-              } else {
-                delete this.plugin.settings.tagDescriptions[tagEntry.tag];
-              }
-              await this.plugin.saveSettings();
-              this.plugin.tagRegistry.rebuild(
-                this.app,
-                this.plugin.settings.tagDescriptions
-              );
-            })
-        );
-    }
+    this.renderCollapsibleList(
+      containerEl,
+      `Tag descriptions (${sortedTags.length})`,
+      "Add descriptions to disambiguate tags for the LLM.",
+      "Search tags…",
+      sortedTags,
+      (item, listEl) => this.renderTagSetting(listEl, item.tag, item.count)
+    );
 
-    containerEl.createEl("h4", { text: "Entity descriptions" });
-    containerEl.createEl("p", {
-      text: "Add descriptions to help the LLM identify entities.",
-      cls: "setting-item-description",
-    });
-
-    for (const entity of this.plugin.entityRegistry.getEntries()) {
-      new Setting(containerEl)
-        .setName(`${entity.canonicalName} (${entity.type})`)
-        .setDesc(
-          entity.aliases.length > 0
-            ? `Aliases: ${entity.aliases.join(", ")}`
-            : "No aliases"
+    this.renderCollapsibleList(
+      containerEl,
+      `Entity descriptions (${sortedEntities.length})`,
+      "Add descriptions to help the LLM identify entities.",
+      "Search entities…",
+      sortedEntities,
+      (item, listEl) =>
+        this.renderEntitySetting(
+          listEl,
+          item.canonicalName,
+          item.type,
+          item.aliases
         )
-        .addText((text) =>
-          text
-            .setPlaceholder("Description…")
-            .setValue(
-              this.plugin.settings.entityDescriptions[entity.canonicalName] ?? ""
-            )
-            .onChange(async (value) => {
-              if (value) {
-                this.plugin.settings.entityDescriptions[entity.canonicalName] =
-                  value;
-              } else {
-                delete this.plugin.settings.entityDescriptions[
-                  entity.canonicalName
-                ];
-              }
-              await this.plugin.saveSettings();
-            })
-        );
-    }
+    );
   }
 
-  private defaultModelName(): string {
+  private renderCollapsibleList<T>(
+    containerEl: HTMLElement,
+    title: string,
+    description: string,
+    searchPlaceholder: string,
+    items: T[],
+    renderItem: (item: T, container: HTMLElement) => void
+  ): void {
+    const wrapper = containerEl.createEl("div");
+    wrapper.style.marginTop = "16px";
+
+    // Toggle header
+    const header = wrapper.createEl("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.cursor = "pointer";
+    header.style.userSelect = "none";
+    header.style.padding = "4px 0";
+
+    const arrow = header.createEl("span", { text: "▶" });
+    arrow.style.marginRight = "6px";
+    arrow.style.fontSize = "10px";
+    arrow.style.transition = "transform 0.15s";
+
+    header.createEl("span", { text: title, cls: "setting-item-name" });
+
+    // Collapsible content
+    const content = wrapper.createEl("div");
+    content.style.display = "none";
+
+    // Description
+    content.createEl("p", {
+      text: description,
+      cls: "setting-item-description",
+    });
+
+    // Search input
+    const searchInput = content.createEl("input");
+    searchInput.type = "text";
+    searchInput.placeholder = searchPlaceholder;
+    searchInput.style.width = "100%";
+    searchInput.style.marginBottom = "8px";
+    searchInput.style.padding = "4px 8px";
+    searchInput.style.boxSizing = "border-box";
+    searchInput.addClass("autotagger-search-input");
+
+    // Item list container
+    const listEl = content.createEl("div");
+
+    const renderFiltered = (query: string): void => {
+      listEl.empty();
+      const lower = query.toLowerCase();
+      let count = 0;
+      for (const item of items) {
+        const label =
+          "tag" in (item as object)
+            ? (item as { tag: string }).tag
+            : (item as { canonicalName: string }).canonicalName;
+        if (!lower || label.toLowerCase().includes(lower)) {
+          renderItem(item, listEl);
+          count++;
+        }
+      }
+      if (count === 0) {
+        listEl.createEl("p", {
+          text: "No results.",
+          cls: "setting-item-description",
+        });
+      }
+    };
+
+    searchInput.addEventListener("input", () => renderFiltered(searchInput.value));
+
+    let opened = false;
+    header.addEventListener("click", () => {
+      const isOpen = content.style.display !== "none";
+      if (isOpen) {
+        content.style.display = "none";
+        arrow.setText("▶");
+        arrow.style.transform = "";
+      } else {
+        content.style.display = "block";
+        arrow.setText("▼");
+        if (!opened) {
+          renderFiltered("");
+          opened = true;
+        }
+      }
+    });
+  }
+
+  private renderTagSetting(
+    container: HTMLElement,
+    tag: string,
+    count: number
+  ): void {
+    new Setting(container)
+      .setName(tag)
+      .setDesc(`Used ${count} time${count !== 1 ? "s" : ""}`)
+      .addText((text) =>
+        text
+          .setPlaceholder("Description…")
+          .setValue(this.plugin.settings.tagDescriptions[tag] ?? "")
+          .onChange(async (value) => {
+            if (value) {
+              this.plugin.settings.tagDescriptions[tag] = value;
+            } else {
+              delete this.plugin.settings.tagDescriptions[tag];
+            }
+            await this.plugin.saveSettings();
+            this.plugin.tagRegistry.rebuild(
+              this.app,
+              this.plugin.settings.tagDescriptions
+            );
+          })
+      );
+  }
+
+  private renderEntitySetting(
+    container: HTMLElement,
+    canonicalName: string,
+    type: string,
+    aliases: string[]
+  ): void {
+    new Setting(container)
+      .setName(`${canonicalName} (${type})`)
+      .setDesc(
+        aliases.length > 0 ? `Aliases: ${aliases.join(", ")}` : "No aliases"
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Description…")
+          .setValue(
+            this.plugin.settings.entityDescriptions[canonicalName] ?? ""
+          )
+          .onChange(async (value) => {
+            if (value) {
+              this.plugin.settings.entityDescriptions[canonicalName] = value;
+            } else {
+              delete this.plugin.settings.entityDescriptions[canonicalName];
+            }
+            await this.plugin.saveSettings();
+          })
+      );
+  }
+
+  private defaultModelPlaceholder(): string {
     switch (this.plugin.settings.provider) {
       case "openai":
-        return "gpt-4o-mini";
+        return "e.g. gpt-5.4";
       case "anthropic":
-        return "claude-3-5-haiku-latest";
+        return "e.g. claude-sonnet-4-6";
       case "google":
-        return "gemini-1.5-flash";
+        return "e.g. gemini-2.5-flash";
       case "ollama":
-        return "llama3.2";
+        return "e.g. llama3.2";
     }
   }
 }
