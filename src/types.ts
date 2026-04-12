@@ -42,7 +42,7 @@ export interface AutoTagSettings {
 export interface AutoTaggerSettings {
   provider: LLMProvider;
   modelName: string;
-  apiKey: string;
+  apiKeys: Partial<Record<LLMProvider, string>>;
   ollamaUrl: string;
   systemPrompt: string;
   maxInputTokens: number;
@@ -73,7 +73,7 @@ Rules:
 export const DEFAULT_SETTINGS: AutoTaggerSettings = {
   provider: "openai",
   modelName: "gpt-4o-mini",
-  apiKey: "",
+  apiKeys: {},
   ollamaUrl: "http://localhost:11434",
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   maxInputTokens: 8000,

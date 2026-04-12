@@ -21,7 +21,7 @@ export class OpenAIAdapter implements LLMAdapter {
       url: "https://api.openai.com/v1/chat/completions",
       method: "POST",
       headers: {
-        Authorization: `Bearer ${this.settings.apiKey}`,
+        Authorization: `Bearer ${this.settings.apiKeys.openai ?? ""}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({

@@ -18,7 +18,7 @@ export class GoogleAdapter implements LLMAdapter {
     const userMessage = buildUserMessage(content, this.settings.maxInputTokens);
 
     const model = this.settings.modelName || "gemini-1.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.settings.apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.settings.apiKeys.google ?? ""}`;
 
     const response = await requestUrl({
       url,

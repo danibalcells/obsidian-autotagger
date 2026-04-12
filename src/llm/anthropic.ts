@@ -21,7 +21,7 @@ export class AnthropicAdapter implements LLMAdapter {
       url: "https://api.anthropic.com/v1/messages",
       method: "POST",
       headers: {
-        "x-api-key": this.settings.apiKey,
+        "x-api-key": this.settings.apiKeys.anthropic ?? "",
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },

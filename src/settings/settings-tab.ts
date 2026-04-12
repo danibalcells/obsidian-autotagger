@@ -97,12 +97,13 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
     this.renderModelSelector(containerEl);
 
     if (this.plugin.settings.provider !== "ollama") {
+      const provider = this.plugin.settings.provider;
       new Setting(containerEl).setName("API key").addText((text) => {
         text
           .setPlaceholder("Enter your API key")
-          .setValue(this.plugin.settings.apiKey)
+          .setValue(this.plugin.settings.apiKeys[provider] ?? "")
           .onChange(async (value) => {
-            this.plugin.settings.apiKey = value;
+            this.plugin.settings.apiKeys[provider] = value;
             await this.plugin.saveSettings();
           });
         text.inputEl.type = "password";
