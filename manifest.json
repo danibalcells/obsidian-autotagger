@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-autotagger",
+  "name": "AutoTagger",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "LLM-powered tag and entity-link suggestions for your vault.",
+  "author": "danibalcells",
+  "authorUrl": "https://github.com/danibalcells",
+  "isDesktopOnly": false
+}

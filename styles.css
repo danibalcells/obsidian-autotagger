@@ -1,0 +1,16 @@
+/* AutoTagger plugin styles */
+
+.autotagger-preview-section h3 {
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.autotagger-preview-section ul {
+  margin: 0 0 8px 0;
+  padding-left: 20px;
+}
+
+.autotagger-batch-progress progress {
+  width: 100%;
+  margin: 8px 0;
+}
