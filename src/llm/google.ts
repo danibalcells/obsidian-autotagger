@@ -5,9 +5,9 @@ import { buildSystemPrompt, buildUserMessage } from "./prompt-builder";
 import { parseLLMResponse } from "./parser";
 
 export class GoogleAdapter implements LLMAdapter {
-  constructor(private settings: AutoTaggerSettings) {}
+  constructor(private settings: AutoTaggerSettings, private apiKey: string) {}
 
-  async tag(content: string, context: RegistryContext): Promise<LLMResponse> {
+  async tag(content: string, context: RegistryContext, existingTags: string[]): Promise<LLMResponse> {
     const allowNew = this.settings.newTagsPolicy === "allow-suggestions";
     const systemPrompt = buildSystemPrompt(
       this.settings.systemPrompt,
@@ -15,10 +15,10 @@ export class GoogleAdapter implements LLMAdapter {
       allowNew,
       this.settings.newTagsNamespace
     );
-    const userMessage = buildUserMessage(content, this.settings.maxInputTokens);
+    const userMessage = buildUserMessage(content, this.settings.maxInputTokens, existingTags);
 
     const model = this.settings.modelName || "gemini-1.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.settings.apiKeys.google ?? ""}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`;
 
     const response = await requestUrl({
       url,

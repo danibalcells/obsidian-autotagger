@@ -2,3 +2,15 @@ node_modules/
 main.js
 *.js.map
 .DS_Store
+.env.eval
+
+# Fixture data — contains personal vault content
+tests/fixtures/notes/
+tests/fixtures/data.json
+tests/fixtures/ground-truth.json
+tests/fixtures/ground-truth.*.bak.json
+tests/fixtures/sample.json
+tests/fixtures/annotation-meta.json
+tests/fixtures/tag-descriptions.json
+tests/fixtures/tag-examples.json
+tests/fixtures/new-tags-provenance.json

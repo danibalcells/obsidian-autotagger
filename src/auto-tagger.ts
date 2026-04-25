@@ -17,7 +17,8 @@ export class AutoTagger {
     private entityRegistry: EntityRegistry,
     private tagRegistry: TagRegistry,
     private getTagCache: () => Record<string, number>,
-    private onTagged: (path: string, timestamp: number) => Promise<void>
+    private onTagged: (path: string, timestamp: number) => Promise<void>,
+    private getApiKey: () => string
   ) {}
 
   start(): void {
@@ -76,7 +77,18 @@ export class AutoTagger {
       !includeFolders.some((f) => file.path.startsWith(f + "/"))
     )
       return false;
+    if (this.hasExcludedTag(file, settings)) return false;
     return true;
+  }
+
+  private hasExcludedTag(file: TFile, settings: AutoTaggerSettings): boolean {
+    const { excludeTagPrefixes } = settings;
+    if (!excludeTagPrefixes || excludeTagPrefixes.length === 0) return false;
+    const cache = this.app.metadataCache.getFileCache(file);
+    const tags: string[] = cache?.frontmatter?.tags ?? [];
+    return tags.some((tag) =>
+      excludeTagPrefixes.some((prefix) => tag.startsWith(prefix))
+    );
   }
 
   async tagFile(file: TFile): Promise<void> {
@@ -91,9 +103,11 @@ export class AutoTagger {
       tags: this.tagRegistry.getEntries(),
     };
 
-    const adapter = createLLMAdapter(settings);
+    const adapter = createLLMAdapter(settings, this.getApiKey());
     const content = await this.app.vault.read(file);
-    const response = await adapter.tag(content, context);
+    const fileCache = this.app.metadataCache.getFileCache(file);
+    const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
+    const response = await adapter.tag(content, context, existingTags);
     const allowNewTags = settings.newTagsPolicy === "allow-suggestions";
 
     await withPreservedMtime(this.app, file, settings.preserveMtime, async () => {

@@ -1,0 +1,12 @@
+{
+  "_comment": "Folder paths are relative to VAULT_PATH. Adjust counts to reach your desired total.",
+  "categories": [
+    { "category": "journal",       "folder": "Knowledge/Journal",           "count": 7,  "recursive": false },
+    { "category": "notes",         "folder": "Knowledge/Notes",             "count": 7,  "recursive": false },
+    { "category": "dots",          "folder": "Knowledge/Dots",              "count": 4,  "recursive": false },
+    { "category": "readwise",      "folder": "Readwise/Articles",           "count": 5,  "recursive": false },
+    { "category": "readwise",      "folder": "Readwise/Podcasts",           "count": 3,  "recursive": false },
+    { "category": "work-diary",    "folder": "Knowledge/Work Diary",        "count": 2,  "recursive": false },
+    { "category": "big-questions", "folder": "Knowledge/Big Questions",     "count": 2,  "recursive": false }
+  ]
+}

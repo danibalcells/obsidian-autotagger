@@ -101,10 +101,9 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
       new Setting(containerEl).setName("API key").addText((text) => {
         text
           .setPlaceholder("Enter your API key")
-          .setValue(this.plugin.settings.apiKeys[provider] ?? "")
+          .setValue(this.plugin.resolveApiKey(provider))
           .onChange(async (value) => {
-            this.plugin.settings.apiKeys[provider] = value;
-            await this.plugin.saveSettings();
+            await this.plugin.saveApiKey(provider, value);
           });
         text.inputEl.type = "password";
       });
@@ -279,6 +278,24 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoTag.excludeFolders.join(", "))
           .onChange(async (value) => {
             this.plugin.settings.autoTag.excludeFolders = value
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Exclude tag prefixes")
+      .setDesc(
+        "Comma-separated tag prefixes — notes with any matching tag are skipped. E.g. \"type/\" skips all notes tagged type/task, type/template, etc."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("type/")
+          .setValue(this.plugin.settings.excludeTagPrefixes.join(", "))
+          .onChange(async (value) => {
+            this.plugin.settings.excludeTagPrefixes = value
               .split(",")
               .map((s) => s.trim())
               .filter(Boolean);

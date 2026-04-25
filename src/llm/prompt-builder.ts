@@ -46,11 +46,21 @@ Respond with JSON matching exactly this schema:
 }`;
 }
 
-export function buildUserMessage(content: string, maxInputTokens: number): string {
+export function buildUserMessage(
+  content: string,
+  maxInputTokens: number,
+  existingTags: string[]
+): string {
   const charLimit = maxInputTokens * 4;
   const truncated =
     content.length > charLimit
       ? content.slice(0, charLimit) + "\n[... content truncated ...]"
       : content;
-  return `Note content:\n\n${truncated}`;
+
+  const existingTagsLine =
+    existingTags.length > 0
+      ? `\n\nAlready applied tags: ${existingTags.join(", ")}\nOnly suggest tags that are NOT already listed above.`
+      : "";
+
+  return `Note content:\n\n${truncated}${existingTagsLine}`;
 }

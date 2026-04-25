@@ -5,14 +5,14 @@ import { AnthropicAdapter } from "./anthropic";
 import { GoogleAdapter } from "./google";
 import { OllamaAdapter } from "./ollama";
 
-export function createLLMAdapter(settings: AutoTaggerSettings): LLMAdapter {
+export function createLLMAdapter(settings: AutoTaggerSettings, apiKey: string): LLMAdapter {
   switch (settings.provider) {
     case "openai":
-      return new OpenAIAdapter(settings);
+      return new OpenAIAdapter(settings, apiKey);
     case "anthropic":
-      return new AnthropicAdapter(settings);
+      return new AnthropicAdapter(settings, apiKey);
     case "google":
-      return new GoogleAdapter(settings);
+      return new GoogleAdapter(settings, apiKey);
     case "ollama":
       return new OllamaAdapter(settings);
   }

@@ -1,5 +1,5 @@
 import { Notice, Plugin } from "obsidian";
-import type { AutoTaggerSettings, BatchScope, PluginData } from "./types";
+import type { AutoTaggerSettings, BatchScope, LLMProvider, PluginData } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import { EntityRegistry } from "./registry/entity-registry";
 import { TagRegistry } from "./registry/tag-registry";
@@ -30,7 +30,8 @@ export default class AutoTaggerPlugin extends Plugin {
       async (path, timestamp) => {
         this.tagCache[path] = timestamp;
         await this.saveData_();
-      }
+      },
+      () => this.resolveApiKey(this.settings.provider)
     );
 
     this.addSettingTab(new AutoTaggerSettingsTab(this.app, this));
@@ -43,7 +44,8 @@ export default class AutoTaggerPlugin extends Plugin {
           this.app,
           this.settings,
           this.entityRegistry,
-          this.tagRegistry
+          this.tagRegistry,
+          () => this.resolveApiKey(this.settings.provider)
         ),
     });
 
@@ -111,14 +113,51 @@ export default class AutoTaggerPlugin extends Plugin {
   async loadData_(): Promise<void> {
     const raw = (await this.loadData()) ?? {};
     if ("settings" in raw) {
-      // New format: { settings, tagCache }
       const data = raw as Partial<PluginData>;
       this.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings ?? {});
       this.tagCache = data.tagCache ?? {};
     } else {
-      // Legacy format: flat settings object
       this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
       this.tagCache = {};
+    }
+    this.migrateApiKeys();
+  }
+
+  resolveApiKey(provider: LLMProvider): string {
+    const key = this.app.secretStorage?.getSecret(`autotagger-${provider}-key`);
+    if (key) return key;
+    return this.settings.apiKeys[provider] ?? "";
+  }
+
+  async saveApiKey(provider: LLMProvider, value: string): Promise<void> {
+    if (this.app.secretStorage) {
+      this.app.secretStorage.setSecret(`autotagger-${provider}-key`, value);
+      if (this.settings.apiKeys[provider]) {
+        delete this.settings.apiKeys[provider];
+        await this.saveSettings();
+      }
+    } else {
+      this.settings.apiKeys[provider] = value;
+      await this.saveSettings();
+    }
+  }
+
+  private migrateApiKeys(): void {
+    const ss = this.app.secretStorage;
+    if (!ss) return;
+    let migrated = false;
+    for (const provider of ["openai", "anthropic", "google"] as LLMProvider[]) {
+      const legacyKey = this.settings.apiKeys[provider];
+      if (legacyKey) {
+        if (!ss.getSecret(`autotagger-${provider}-key`)) {
+          ss.setSecret(`autotagger-${provider}-key`, legacyKey);
+        }
+        delete this.settings.apiKeys[provider];
+        migrated = true;
+      }
+    }
+    if (migrated) {
+      this.saveSettings().catch(console.error);
     }
   }
 
@@ -143,7 +182,8 @@ export default class AutoTaggerPlugin extends Plugin {
         this.settings.lastBatchRun = lastRun;
         Object.assign(this.tagCache, cacheUpdates);
         await this.saveData_();
-      }
+      },
+      () => this.resolveApiKey(this.settings.provider)
     ).catch((err) => {
       console.error("AutoTagger batch error:", err);
       new Notice(

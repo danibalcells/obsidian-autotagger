@@ -12,7 +12,8 @@ export async function tagCurrentNote(
   app: App,
   settings: AutoTaggerSettings,
   entityRegistry: EntityRegistry,
-  tagRegistry: TagRegistry
+  tagRegistry: TagRegistry,
+  getApiKey: () => string
 ): Promise<void> {
   const file = app.workspace.getActiveFile();
   if (!file) {
@@ -29,8 +30,10 @@ export async function tagCurrentNote(
       tags: tagRegistry.getEntries(),
     };
 
-    const adapter = createLLMAdapter(settings);
-    const response = await adapter.tag(content, context);
+    const adapter = createLLMAdapter(settings, getApiKey());
+    const fileCache = app.metadataCache.getFileCache(file);
+    const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
+    const response = await adapter.tag(content, context, existingTags);
 
     new PreviewModal(app, response, async () => {
       await withPreservedMtime(app, file, settings.preserveMtime, async () => {

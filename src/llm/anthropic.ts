@@ -5,9 +5,9 @@ import { buildSystemPrompt, buildUserMessage } from "./prompt-builder";
 import { parseLLMResponse } from "./parser";
 
 export class AnthropicAdapter implements LLMAdapter {
-  constructor(private settings: AutoTaggerSettings) {}
+  constructor(private settings: AutoTaggerSettings, private apiKey: string) {}
 
-  async tag(content: string, context: RegistryContext): Promise<LLMResponse> {
+  async tag(content: string, context: RegistryContext, existingTags: string[]): Promise<LLMResponse> {
     const allowNew = this.settings.newTagsPolicy === "allow-suggestions";
     const systemPrompt = buildSystemPrompt(
       this.settings.systemPrompt,
@@ -15,13 +15,13 @@ export class AnthropicAdapter implements LLMAdapter {
       allowNew,
       this.settings.newTagsNamespace
     );
-    const userMessage = buildUserMessage(content, this.settings.maxInputTokens);
+    const userMessage = buildUserMessage(content, this.settings.maxInputTokens, existingTags);
 
     const response = await requestUrl({
       url: "https://api.anthropic.com/v1/messages",
       method: "POST",
       headers: {
-        "x-api-key": this.settings.apiKeys.anthropic ?? "",
+        "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },

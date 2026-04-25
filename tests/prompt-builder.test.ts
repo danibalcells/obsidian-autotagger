@@ -45,21 +45,32 @@ describe("buildSystemPrompt", () => {
 
 describe("buildUserMessage", () => {
   it("returns content wrapped in note content header", () => {
-    const msg = buildUserMessage("Hello world", 8000);
+    const msg = buildUserMessage("Hello world", 8000, []);
     expect(msg).toContain("Note content:");
     expect(msg).toContain("Hello world");
   });
 
   it("truncates very long content", () => {
     const longContent = "x".repeat(100000);
-    const msg = buildUserMessage(longContent, 100);
+    const msg = buildUserMessage(longContent, 100, []);
     expect(msg).toContain("[... content truncated ...]");
   });
 
   it("does not truncate content within limits", () => {
     const content = "Short note.";
-    const msg = buildUserMessage(content, 8000);
+    const msg = buildUserMessage(content, 8000, []);
     expect(msg).not.toContain("truncated");
     expect(msg).toContain("Short note.");
+  });
+
+  it("appends existing tags when provided", () => {
+    const msg = buildUserMessage("Hello world", 8000, ["tech/ai", "topic/llm"]);
+    expect(msg).toContain("Already applied tags: tech/ai, topic/llm");
+    expect(msg).toContain("Only suggest tags that are NOT already listed above");
+  });
+
+  it("omits existing tags section when list is empty", () => {
+    const msg = buildUserMessage("Hello world", 8000, []);
+    expect(msg).not.toContain("Already applied tags");
   });
 });

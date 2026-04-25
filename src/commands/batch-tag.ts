@@ -18,7 +18,8 @@ export async function batchTag(
   onComplete: (
     lastRun: number,
     cacheUpdates: Record<string, number>
-  ) => Promise<void>
+  ) => Promise<void>,
+  getApiKey: () => string
 ): Promise<void> {
   const files = getFilesForScope(app, settings, scope, tagCache);
   if (files.length === 0) {
@@ -36,7 +37,7 @@ export async function batchTag(
     entities: entityRegistry.getEntries(),
     tags: tagRegistry.getEntries(),
   };
-  const adapter = createLLMAdapter(settings);
+  const adapter = createLLMAdapter(settings, getApiKey());
   const allowNewTags = settings.newTagsPolicy === "allow-suggestions";
 
   let processed = 0;
@@ -55,7 +56,9 @@ export async function batchTag(
 
     try {
       const content = await app.vault.read(file);
-      const response = await adapter.tag(content, context);
+      const fileCache = app.metadataCache.getFileCache(file);
+      const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
+      const response = await adapter.tag(content, context, existingTags);
 
       await withPreservedMtime(app, file, settings.preserveMtime, async () => {
         await mergeFrontmatter(app, file, response, entityRegistry, allowNewTags);
@@ -89,6 +92,16 @@ function getFilesForScope(
       !includeFolders.some((f) => file.path.startsWith(f + "/"))
     )
       return false;
+    if (settings.excludeTagPrefixes?.length > 0) {
+      const cache = app.metadataCache.getFileCache(file);
+      const tags: string[] = cache?.frontmatter?.tags ?? [];
+      if (
+        tags.some((tag) =>
+          settings.excludeTagPrefixes.some((prefix) => tag.startsWith(prefix))
+        )
+      )
+        return false;
+    }
     return true;
   };
 

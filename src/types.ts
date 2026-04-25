@@ -58,6 +58,7 @@ export interface AutoTaggerSettings {
   newTagsNamespace: string;
   entityDescriptions: Record<string, string>;
   tagDescriptions: Record<string, string>;
+  excludeTagPrefixes: string[];
   lastBatchRun: number;
 }
 
@@ -95,6 +96,7 @@ export const DEFAULT_SETTINGS: AutoTaggerSettings = {
   newTagsNamespace: "topic/",
   entityDescriptions: {},
   tagDescriptions: {},
+  excludeTagPrefixes: ["type/"],
   lastBatchRun: 0,
 };
 
