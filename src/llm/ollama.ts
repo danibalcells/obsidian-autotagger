@@ -7,7 +7,7 @@ import { parseLLMResponse } from "./parser";
 export class OllamaAdapter implements LLMAdapter {
   constructor(private settings: AutoTaggerSettings) {}
 
-  async tag(content: string, context: RegistryContext, existingTags: string[]): Promise<LLMResponse> {
+  async tag(content: string, context: RegistryContext, existingTags: string[], title?: string): Promise<LLMResponse> {
     const allowNew = this.settings.newTagsPolicy === "allow-suggestions";
     const systemPrompt = buildSystemPrompt(
       this.settings.systemPrompt,
@@ -15,7 +15,7 @@ export class OllamaAdapter implements LLMAdapter {
       allowNew,
       this.settings.newTagsNamespace
     );
-    const userMessage = buildUserMessage(content, this.settings.maxInputTokens, existingTags);
+    const userMessage = buildUserMessage(content, this.settings.maxInputTokens, existingTags, title);
 
     const baseUrl = this.settings.ollamaUrl.replace(/\/$/, "");
 

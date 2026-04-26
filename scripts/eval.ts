@@ -75,13 +75,20 @@ const tagDescriptions: Record<string, string> = loadJson<Record<string, string>>
   {}
 );
 
-// Merge human-authored tag descriptions into the registry context
+const excludeTagPrefixes = (process.env.EXCLUDE_TAG_PREFIXES ?? "type/,readwise")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Merge human-authored tag descriptions into the registry context, excluding tag prefixes
 const context: RegistryContext = {
   ...rawContext,
-  tags: rawContext.tags.map((t) => ({
-    ...t,
-    description: tagDescriptions[t.tag] ?? t.description,
-  })),
+  tags: rawContext.tags
+    .filter((t) => !excludeTagPrefixes.some((p) => t.tag.startsWith(p)))
+    .map((t) => ({
+      ...t,
+      description: tagDescriptions[t.tag] ?? t.description,
+    })),
 };
 
 const groundTruth: Record<string, LLMResponse> = JSON.parse(
@@ -140,7 +147,7 @@ const settings: AutoTaggerSettings = {
   newTagsNamespace: process.env.NEW_TAGS_NS ?? "topic/",
   entityDescriptions: {},
   tagDescriptions: {},
-  excludeTagPrefixes: [],
+  excludeTagPrefixes,
   lastBatchRun: 0,
 };
 
@@ -305,7 +312,7 @@ async function tagNote(notePath: string, category: string): Promise<NoteResult> 
 
   let predicted: LLMResponse;
   try {
-    predicted = await adapter.tag(content, context, []);
+    predicted = await adapter.tag(content, context, [], path.basename(notePath, ".md"));
   } catch (err) {
     const error = String(err);
     generation?.end({ output: { error }, level: "ERROR" });
@@ -372,6 +379,27 @@ for (const r of results) {
       `${name}  ${pct(r.overall.precision).padStart(4)}  ${pct(r.overall.recall).padStart(4)}  ${pct(r.overall.f1).padStart(4)}`
     );
   }
+}
+
+// ─── Per-note tag details ─────────────────────────────────────────────────────
+
+console.log("\n" + SEP);
+console.log("PER-NOTE TAG PREDICTIONS");
+console.log(SEP);
+
+for (const r of successful) {
+  const name = path.basename(r.notePath).replace(/\.md$/, "");
+  const truth = groundTruth[r.notePath];
+  const tags = r.byCategory.tags;
+  const fnSet = new Set(tags.fn.map(normalize));
+  const truthTags = [...(truth.tags ?? []), ...(truth.new_tags ?? [])];
+  const tpTags = truthTags.filter((t) => !fnSet.has(normalize(t)));
+
+  console.log(`\n${name}  [F1: ${pct(r.byCategory.tags.f1)}]`);
+  if (tpTags.length)  console.log(`  ✓  ${tpTags.join("  ")}`);
+  if (tags.fp.length) console.log(`  +  ${tags.fp.join("  ")}  [FP]`);
+  if (tags.fn.length) console.log(`  -  ${tags.fn.join("  ")}  [FN]`);
+  if (!tpTags.length && !tags.fp.length && !tags.fn.length) console.log(`  (no tags in truth or prediction)`);
 }
 
 // ─── Aggregate ────────────────────────────────────────────────────────────────

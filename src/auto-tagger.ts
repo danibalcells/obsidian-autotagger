@@ -98,16 +98,19 @@ export class AutoTagger {
     if (lastTagged >= file.stat.mtime) return;
 
     const settings = this.getSettings();
+    const excludePrefixes = settings.excludeTagPrefixes ?? [];
     const context = {
       entities: this.entityRegistry.getEntries(),
-      tags: this.tagRegistry.getEntries(),
+      tags: this.tagRegistry.getEntries().filter(
+        (t) => !excludePrefixes.some((p) => t.tag.startsWith(p))
+      ),
     };
 
     const adapter = createLLMAdapter(settings, this.getApiKey());
     const content = await this.app.vault.read(file);
     const fileCache = this.app.metadataCache.getFileCache(file);
     const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
-    const response = await adapter.tag(content, context, existingTags);
+    const response = await adapter.tag(content, context, existingTags, file.basename);
     const allowNewTags = settings.newTagsPolicy === "allow-suggestions";
 
     await withPreservedMtime(this.app, file, settings.preserveMtime, async () => {

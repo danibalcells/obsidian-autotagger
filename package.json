@@ -12,6 +12,9 @@
     "export-registry": "tsx --tsconfig tsconfig.eval.json scripts/export-registry.ts",
     "sample": "tsx --tsconfig tsconfig.eval.json scripts/sample-notes.ts",
     "annotate": "tsx watch --tsconfig tsconfig.eval.json scripts/annotate.ts",
+    "merge-tags": "tsx --tsconfig tsconfig.eval.json scripts/merge-tags.ts",
+    "generate-tags": "tsx --tsconfig tsconfig.eval.json scripts/generate-tag-descriptions.ts",
+    "infer-tags": "tsx --tsconfig tsconfig.eval.json scripts/infer-tag-descriptions.ts",
     "derive-examples": "tsx --tsconfig tsconfig.eval.json scripts/derive-tag-examples.ts",
     "eval": "tsx --tsconfig tsconfig.eval.json scripts/eval.ts",
     "deploy": "scripts/deploy_local.sh"

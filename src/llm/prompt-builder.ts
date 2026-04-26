@@ -49,7 +49,8 @@ Respond with JSON matching exactly this schema:
 export function buildUserMessage(
   content: string,
   maxInputTokens: number,
-  existingTags: string[]
+  existingTags: string[],
+  title?: string
 ): string {
   const charLimit = maxInputTokens * 4;
   const truncated =
@@ -57,10 +58,12 @@ export function buildUserMessage(
       ? content.slice(0, charLimit) + "\n[... content truncated ...]"
       : content;
 
+  const titleLine = title ? `Note title: ${title}\n\n` : "";
+
   const existingTagsLine =
     existingTags.length > 0
       ? `\n\nAlready applied tags: ${existingTags.join(", ")}\nOnly suggest tags that are NOT already listed above.`
       : "";
 
-  return `Note content:\n\n${truncated}${existingTagsLine}`;
+  return `${titleLine}Note content:\n\n${truncated}${existingTagsLine}`;
 }

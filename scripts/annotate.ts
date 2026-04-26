@@ -5,11 +5,14 @@
  *   npm run sample          # generate tests/fixtures/sample.json first
  *   npm run annotate        # start the UI
  *
- * Reads notes directly from VAULT_PATH (via sample.json).
+ * Views:
+ *   Annotate — label notes with tags, entities, and descriptions
+ *   Tags     — browse all tags, edit/generate descriptions, view tagged notes
+ *
  * Saves progress incrementally to tests/fixtures/:
- *   ground-truth.json       — { notePath: { tags, people, organizations, places } }
- *   tag-descriptions.json   — { tag: "one-line description" }
- *   annotation-meta.json    — { notePath: { time_spent_ms, notes, added_new_tags, last_saved } }
+ *   ground-truth.json     — { notePath: { tags, people, organizations, places } }
+ *   tag-descriptions.json — { tag: "one-line description" }
+ *   annotation-meta.json  — { notePath: { time_spent_ms, notes, added_new_tags, last_saved } }
  */
 
 import express from "express";
@@ -17,6 +20,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as net from "net";
 import { configDotenv } from "dotenv";
+import matter from "gray-matter";
 import type { RegistryContext, LLMResponse } from "../src/types";
 
 configDotenv({ path: ".env.eval" });
@@ -78,10 +82,210 @@ function findPort(start: number): Promise<number> {
   });
 }
 
+// ─── Vault tag index (lazy, cached) ──────────────────────────────────────────
+
+let vaultTagIndex: Record<string, string[]> | null = null;
+
+function getVaultTagIndex(): Record<string, string[]> {
+  if (vaultTagIndex) return vaultTagIndex;
+  const index: Record<string, string[]> = {};
+
+  function walkDir(dir: string): void {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkDir(fullPath);
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith(".md") &&
+        !entry.name.startsWith(".")
+      ) {
+        try {
+          const raw = fs.readFileSync(fullPath, "utf-8");
+          const { data } = matter(raw);
+          const rawTags = data["tags"];
+          const tags: string[] = Array.isArray(rawTags)
+            ? rawTags.filter((t: unknown): t is string => typeof t === "string")
+            : typeof rawTags === "string" && rawTags
+            ? [rawTags]
+            : [];
+          const relPath = path.relative(vaultPath, fullPath);
+          const relLower = relPath.toLowerCase().replace(/\\/g, "/");
+          if (relLower.startsWith("archive/topics/")) continue;
+          for (const tag of tags) {
+            if (!index[tag]) index[tag] = [];
+            index[tag].push(relPath);
+          }
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+  }
+
+  console.log("Building vault tag index…");
+  walkDir(vaultPath);
+  vaultTagIndex = index;
+  const total = Object.values(index).reduce((s, v) => s + v.length, 0);
+  console.log(`  ${Object.keys(index).length} tags, ${total} tag-note pairs indexed`);
+  return index;
+}
+
+function truncateNoteContent(rawContent: string, maxWords = 1000): string {
+  const withoutFm = rawContent.replace(/^---[\s\S]*?---\s*\n?/, "");
+  const words = withoutFm.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length <= maxWords * 2) return withoutFm;
+  const first = words.slice(0, maxWords).join(" ");
+  const last = words.slice(-maxWords).join(" ");
+  const dropped = Math.max(0, withoutFm.length - first.length - last.length - 6);
+  return `${first}\n\n... [truncated ${dropped} characters] ...\n\n${last}`;
+}
+
+async function generateTagDescription(
+  tag: string
+): Promise<{ description: string; sourceNotes: string[] }> {
+  const index = getVaultTagIndex();
+  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const tagNotes = index[tag] ?? [];
+  if (tagNotes.length === 0) throw new Error("No vault notes tagged with this tag");
+
+  // Round-robin across top-level folders for diversity, up to 15 notes
+  const byFolder: Record<string, string[]> = {};
+  for (const notePath of tagNotes) {
+    const folder = notePath.split("/")[0];
+    if (!byFolder[folder]) byFolder[folder] = [];
+    byFolder[folder].push(notePath);
+  }
+  const folderQueues: Record<string, string[]> = Object.fromEntries(
+    Object.entries(byFolder).map(([f, notes]) => [f, [...notes]])
+  );
+  const folders = Object.keys(folderQueues).sort();
+  const selectedNotes: string[] = [];
+  while (selectedNotes.length < 15) {
+    let added = false;
+    for (const folder of folders) {
+      if (selectedNotes.length >= 15) break;
+      if (folderQueues[folder].length > 0) {
+        selectedNotes.push(folderQueues[folder].shift()!);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+
+  // Few-shot: up to 3 tags with descriptions + 2 snippet notes each, ≤ 2000 words total
+  const exampleEntries = Object.entries(descs).filter(
+    ([t, d]) => t !== tag && d.trim().length > 0 && (index[t]?.length ?? 0) >= 2
+  );
+  let fewShotSection = "";
+  let fewShotWords = 0;
+  const MAX_FEWSHOT_WORDS = 2000;
+
+  if (exampleEntries.length > 0) {
+    fewShotSection += "Example tags with descriptions:\n\n";
+    fewShotWords += 6;
+    for (const [exTag, exDesc] of exampleEntries.slice(0, 3)) {
+      if (fewShotWords >= MAX_FEWSHOT_WORDS) break;
+      let block = `Tag: ${exTag}\nDescription: "${exDesc}"\n`;
+      for (const np of (index[exTag] ?? []).slice(0, 2)) {
+        const abs = path.join(vaultPath, np);
+        if (!fs.existsSync(abs)) continue;
+        const snippet = fs
+          .readFileSync(abs, "utf-8")
+          .replace(/^---[\s\S]*?---\s*\n?/, "")
+          .split(/\s+/)
+          .filter((w) => w)
+          .slice(0, 120)
+          .join(" ");
+        block += `  Note (${path.basename(np, ".md")}): ${snippet}\n`;
+      }
+      const blockWords = block.split(/\s+/).length;
+      if (fewShotWords + blockWords > MAX_FEWSHOT_WORDS) break;
+      fewShotSection += block + "\n";
+      fewShotWords += blockWords;
+    }
+    fewShotSection += "---\n\n";
+  }
+
+  // Notes for target tag
+  const includedNotes: string[] = [];
+  let notesSection = "";
+  for (const notePath of selectedNotes) {
+    const abs = path.join(vaultPath, notePath);
+    if (!fs.existsSync(abs)) continue;
+    const truncated = truncateNoteContent(fs.readFileSync(abs, "utf-8"), 1000);
+    notesSection += `--- ${notePath} ---\n${truncated}\n\n`;
+    includedNotes.push(notePath);
+  }
+
+  const userMessage =
+    fewShotSection +
+    `Write a single-line description for the tag "${tag}".\n\n` +
+    `Requirements: ≤ 120 characters, no surrounding quotes, captures what makes notes with this tag distinctive.\n\n` +
+    `Notes tagged "${tag}" (${includedNotes.length}):\n\n` +
+    notesSection +
+    `Reply with ONLY the description text.`;
+
+  const apiKey = process.env.API_KEY ?? "";
+  const model = process.env.MODEL ?? "claude-sonnet-4-6";
+  if (!apiKey) throw new Error("API_KEY not set in .env.eval");
+
+  // Attempt with extended thinking; fall back if the model/version doesn't support it
+  let response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+      "anthropic-beta": "interleaved-thinking-2025-05-14",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8000,
+      thinking: { type: "enabled", budget_tokens: 3000 },
+      messages: [{ role: "user", content: userMessage }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    if (response.status === 400) {
+      console.warn("Extended thinking unavailable, retrying without it…");
+      response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 512,
+          messages: [{ role: "user", content: userMessage }],
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`);
+      }
+    } else {
+      throw new Error(`Anthropic API error ${response.status}: ${errText}`);
+    }
+  }
+
+  const json = (await response.json()) as {
+    content: Array<{ type: string; text?: string }>;
+  };
+  const description = json.content?.find((b) => b.type === "text")?.text?.trim() ?? "";
+  return { description, sourceNotes: includedNotes };
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
+
 const app = express();
 app.use(express.json());
 
-// ─── API ─────────────────────────────────────────────────────────────────────
+// ─── Annotate API ─────────────────────────────────────────────────────────────
 
 app.get("/api/sample", (_req, res) => {
   const gt = loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {});
@@ -164,6 +368,75 @@ app.delete("/api/ground-truth/*notePath", (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Tags API ─────────────────────────────────────────────────────────────────
+
+app.get("/api/tags", (_req, res) => {
+  const data = loadJson<RegistryContext>(DATA_PATH, { entities: [], tags: [] });
+  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const index = getVaultTagIndex();
+
+  const allTagSet = new Set<string>([
+    ...data.tags.map((t) => t.tag),
+    ...Object.keys(descs),
+    ...Object.keys(index),
+  ]);
+
+  const tagList = [...allTagSet]
+    .map((tag) => {
+      const reg = data.tags.find((t) => t.tag === tag);
+      return {
+        tag,
+        description: descs[tag] ?? reg?.description ?? "",
+        noteCount: index[tag]?.length ?? 0,
+        registryCount: reg?.count ?? 0,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.noteCount - a.noteCount ||
+        b.registryCount - a.registryCount ||
+        a.tag.localeCompare(b.tag)
+    );
+
+  res.json(tagList);
+});
+
+app.get("/api/tag-notes", (req, res) => {
+  const tag = typeof req.query.tag === "string" ? req.query.tag : undefined;
+  if (!tag) return res.status(400).json({ error: "tag query param required" });
+  const index = getVaultTagIndex();
+  const notes = (index[tag] ?? []).map((notePath) => ({
+    path: notePath,
+    folder: notePath.split("/").slice(0, 2).join("/"),
+    name: path.basename(notePath, ".md"),
+  }));
+  res.json({ notes });
+});
+
+app.post("/api/tag-descriptions", (req, res) => {
+  const { tag, description } = req.body as { tag: string; description: string };
+  if (!tag) return res.status(400).json({ error: "tag required" });
+  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  if (description && description.trim()) {
+    descs[tag] = description.trim();
+  } else {
+    delete descs[tag];
+  }
+  saveJson(TAG_DESCRIPTIONS_PATH, descs);
+  res.json({ ok: true });
+});
+
+app.post("/api/tag-generate", async (req, res) => {
+  const { tag } = req.body as { tag: string };
+  if (!tag) return res.status(400).json({ error: "tag required" });
+  try {
+    const result = await generateTagDescription(tag);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.get("/", (_req, res) => res.send(HTML));
 
 findPort(3000).then((port) => {
@@ -215,6 +488,13 @@ const HTML = /* html */ `<!DOCTYPE html>
   .desc-row { display:flex; align-items:center; gap:4px; margin-top:3px; background:#fffbeb; border:1px solid #fde68a; border-radius:4px; padding:3px 6px; }
   .desc-row input { flex:1; font-size:11px; border:none; outline:none; background:transparent; color:#92400e; }
   .desc-row label { font-size:10px; color:#b45309; white-space:nowrap; }
+  .tab-btn { color:#6b7280; font-weight:500; transition:all 0.1s; }
+  .tab-btn.active { background:white; color:#1d4ed8; box-shadow:0 1px 2px rgba(0,0,0,0.08); }
+  .tag-note-row { border-bottom:1px solid #f3f4f6; }
+  .tag-note-row:last-child { border-bottom:none; }
+  .tag-note-header { cursor:pointer; display:flex; align-items:center; gap:6px; padding:6px 8px; }
+  .tag-note-header:hover { background:#f9fafb; }
+  .tag-note-body { padding:0 8px 8px; }
   ::-webkit-scrollbar { width:5px; height:5px; }
   ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb { background:#d1d5db; border-radius:3px; }
@@ -225,6 +505,10 @@ const HTML = /* html */ `<!DOCTYPE html>
 <!-- Header -->
 <header class="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-4 shrink-0">
   <span class="font-semibold text-gray-800 text-sm">Annotation UI</span>
+  <div class="flex gap-0.5 bg-gray-100 rounded p-0.5">
+    <button id="tab-annotate" class="tab-btn active text-xs px-3 py-1 rounded" onclick="switchTab('annotate')">Annotate</button>
+    <button id="tab-tags" class="tab-btn text-xs px-3 py-1 rounded" onclick="switchTab('tags')">Tags</button>
+  </div>
   <div class="flex-1 bg-gray-200 rounded-full h-1.5 max-w-xs">
     <div id="progress-bar" class="bg-indigo-500 h-1.5 rounded-full transition-all"></div>
   </div>
@@ -232,8 +516,8 @@ const HTML = /* html */ `<!DOCTYPE html>
   <span id="saved-indicator" class="text-xs text-green-600 saved-flash opacity-0">Saved ✓</span>
 </header>
 
-<!-- Main layout -->
-<div class="flex flex-1 overflow-hidden">
+<!-- Annotate view -->
+<div id="annotate-view" class="flex flex-1 overflow-hidden">
 
   <!-- Sidebar: note list -->
   <aside id="sidebar" class="bg-white border-r border-gray-200 flex flex-col overflow-hidden">
@@ -276,6 +560,50 @@ const HTML = /* html */ `<!DOCTYPE html>
 
 </div>
 
+<!-- Tags view -->
+<div id="tags-view" class="flex flex-1 overflow-hidden hidden">
+
+  <!-- Tag sidebar -->
+  <aside style="min-width:220px;max-width:220px" class="bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+    <div class="p-2 border-b border-gray-100">
+      <input id="tag-search" type="text" placeholder="Filter tags…"
+        class="w-full text-xs border border-gray-200 rounded px-2 py-1.5 outline-none focus:border-indigo-400">
+    </div>
+    <div id="tag-list" class="flex-1 overflow-y-auto p-1"></div>
+  </aside>
+
+  <!-- Tag main panel -->
+  <main class="flex-1 flex flex-col overflow-hidden bg-white">
+    <div class="px-4 py-2 border-b border-gray-100 flex items-center gap-2 shrink-0">
+      <span id="tag-header" class="text-xs font-mono text-gray-500 truncate">Select a tag</span>
+    </div>
+    <div id="tag-empty-state" class="flex-1 flex items-center justify-center">
+      <p class="text-xs text-gray-400">Select a tag to view and edit its description</p>
+    </div>
+    <div id="tag-content" class="flex-1 overflow-y-auto p-4 space-y-5 hidden">
+      <!-- Description -->
+      <div>
+        <label class="text-xs font-medium text-gray-500 block mb-1.5">Description</label>
+        <div class="flex gap-2 items-start">
+          <textarea id="tag-desc" rows="2"
+            class="flex-1 text-xs border border-gray-200 rounded p-2 outline-none focus:border-indigo-400 resize-none"
+            placeholder="One-line description of this tag…"></textarea>
+          <button id="tag-generate-btn"
+            class="text-xs px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-200 rounded whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Auto-generate description from vault notes" disabled>✨ Generate</button>
+        </div>
+        <div id="tag-generate-source" class="text-xs text-gray-400 mt-1 italic"></div>
+      </div>
+      <!-- Notes list -->
+      <div>
+        <label class="text-xs font-medium text-gray-500 block mb-2" id="tag-notes-label">Tagged notes</label>
+        <div id="tag-notes-list" class="border border-gray-100 rounded-md overflow-hidden"></div>
+      </div>
+    </div>
+  </main>
+
+</div>
+
 <script>
 // ─── State ─────────────────────────────────────────────────────────────────
 let allNotes = [];
@@ -288,6 +616,40 @@ let saveTimer = null;
 let noteStartTime = null;
 let accumulatedMs = 0;
 const tagInputs = {};
+
+// Tags view state
+let allTags = [];
+let currentTag = null;
+let tagNoteContentCache = {};
+let tagNotesExpanded = {};
+let tagSaveTimer = null;
+let tagsViewBooted = false;
+
+// ─── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(tab) {
+  const annotateView = document.getElementById('annotate-view');
+  const tagsView = document.getElementById('tags-view');
+  const tabAnnotate = document.getElementById('tab-annotate');
+  const tabTags = document.getElementById('tab-tags');
+  if (tab === 'annotate') {
+    annotateView.classList.remove('hidden');
+    tagsView.classList.add('hidden');
+    tabAnnotate.classList.add('active');
+    tabTags.classList.remove('active');
+    updateProgress();
+  } else {
+    annotateView.classList.add('hidden');
+    tagsView.classList.remove('hidden');
+    tabAnnotate.classList.remove('active');
+    tabTags.classList.add('active');
+    if (!tagsViewBooted) {
+      bootTagsView();
+      tagsViewBooted = true;
+    } else {
+      updateTagProgress();
+    }
+  }
+}
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 async function boot() {
@@ -484,6 +846,13 @@ function updateProgress() {
   document.getElementById('progress-label').textContent = labeled + '/' + total + ' labeled';
 }
 
+function updateTagProgress() {
+  const described = allTags.filter(t => t.description && t.description.trim()).length;
+  const total = allTags.length;
+  document.getElementById('progress-bar').style.width = total > 0 ? (described / total * 100) + '%' : '0%';
+  document.getElementById('progress-label').textContent = described + '/' + total + ' described';
+}
+
 document.getElementById('save-btn').addEventListener('click', () => { clearTimeout(saveTimer); save(); });
 
 document.getElementById('clear-btn').addEventListener('click', async () => {
@@ -495,6 +864,211 @@ document.getElementById('clear-btn').addEventListener('click', async () => {
   document.getElementById('anno-notes').value = '';
   updateProgress();
   refreshNoteList();
+});
+
+// ─── Tags view ─────────────────────────────────────────────────────────────
+async function bootTagsView() {
+  const tagsRes = await fetch('/api/tags').then(r => r.json());
+  allTags = tagsRes;
+  renderTagList(allTags);
+  updateTagProgress();
+
+  document.getElementById('tag-search').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase();
+    renderTagList(q ? allTags.filter(t => t.tag.toLowerCase().includes(q)) : allTags);
+  });
+}
+
+function renderTagList(tags) {
+  const list = document.getElementById('tag-list');
+  list.innerHTML = '';
+  tags.forEach(tag => {
+    const div = document.createElement('div');
+    div.className = 'note-item' + (currentTag?.tag === tag.tag ? ' active' : '');
+    const hasDesc = tag.description && tag.description.trim();
+    div.innerHTML =
+      '<div class="dot ' + (hasDesc ? 'labeled' : 'unlabeled') + '"></div>' +
+      '<span class="truncate flex-1" title="' + escHtml(tag.tag) + '">' + escHtml(tag.tag) + '</span>' +
+      '<span class="cat-badge">' + tag.noteCount + '</span>';
+    div.addEventListener('click', () => selectTag(tag));
+    list.appendChild(div);
+  });
+}
+
+function refreshTagList() {
+  const q = document.getElementById('tag-search').value.toLowerCase();
+  renderTagList(q ? allTags.filter(t => t.tag.toLowerCase().includes(q)) : allTags);
+}
+
+async function selectTag(tag) {
+  currentTag = tag;
+  refreshTagList();
+
+  document.getElementById('tag-header').textContent = tag.tag;
+  document.getElementById('tag-desc').value = tag.description ?? '';
+
+  const generateBtn = document.getElementById('tag-generate-btn');
+  generateBtn.disabled = tag.noteCount === 0;
+  generateBtn.textContent = '✨ Generate';
+  document.getElementById('tag-generate-source').textContent = '';
+
+  document.getElementById('tag-empty-state').classList.add('hidden');
+  document.getElementById('tag-content').classList.remove('hidden');
+
+  document.getElementById('tag-notes-label').textContent =
+    'Tagged notes (' + tag.noteCount + ')';
+
+  const notesContainer = document.getElementById('tag-notes-list');
+  notesContainer.innerHTML = '<div class="p-2 text-xs text-gray-400">Loading…</div>';
+
+  const { notes } = await fetch('/api/tag-notes?tag=' + encodeURIComponent(tag.tag)).then(r => r.json());
+  renderTagNotes(notes);
+}
+
+function renderTagNotes(notes) {
+  const container = document.getElementById('tag-notes-list');
+  container.innerHTML = '';
+  if (notes.length === 0) {
+    container.innerHTML = '<div class="p-3 text-xs text-gray-400">No notes with this tag found in the vault.</div>';
+    return;
+  }
+  notes.forEach(note => {
+    const expanded = tagNotesExpanded[note.path] ?? false;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'tag-note-row';
+    wrapper.dataset.path = note.path;
+
+    const header = document.createElement('div');
+    header.className = 'tag-note-header';
+    header.innerHTML =
+      '<span class="flex-1 text-xs font-mono truncate text-gray-700" title="' + escHtml(note.path) + '">' + escHtml(note.name) + '</span>' +
+      '<span class="cat-badge shrink-0">' + escHtml(note.folder) + '</span>' +
+      '<span class="text-gray-400 text-xs shrink-0 ml-1 expand-chevron">' + (expanded ? '▲' : '▼') + '</span>';
+
+    const body = document.createElement('div');
+    body.className = 'tag-note-body' + (expanded ? '' : ' hidden');
+    if (expanded && tagNoteContentCache[note.path]) {
+      const pre = document.createElement('pre');
+      pre.className = 'note-content text-gray-600 text-xs max-h-64 overflow-y-auto bg-gray-50 rounded p-2';
+      pre.textContent = tagNoteContentCache[note.path];
+      body.appendChild(pre);
+    }
+
+    header.addEventListener('click', () => toggleTagNote(wrapper, note));
+    wrapper.appendChild(header);
+    wrapper.appendChild(body);
+    container.appendChild(wrapper);
+  });
+}
+
+async function toggleTagNote(wrapper, note) {
+  const body = wrapper.querySelector('.tag-note-body');
+  const chevron = wrapper.querySelector('.expand-chevron');
+  const isExpanded = !body.classList.contains('hidden');
+
+  if (isExpanded) {
+    body.classList.add('hidden');
+    chevron.textContent = '▼';
+    tagNotesExpanded[note.path] = false;
+  } else {
+    chevron.textContent = '▲';
+    tagNotesExpanded[note.path] = true;
+    body.classList.remove('hidden');
+    if (!tagNoteContentCache[note.path]) {
+      body.innerHTML = '<p class="text-xs text-gray-400 py-2 px-1">Loading…</p>';
+      try {
+        const { content } = await fetch(
+          '/api/notes/' + note.path.split('/').map(encodeURIComponent).join('/')
+        ).then(r => r.json());
+        tagNoteContentCache[note.path] = content;
+        body.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'note-content text-gray-600 text-xs max-h-64 overflow-y-auto bg-gray-50 rounded p-2';
+        pre.textContent = content;
+        body.appendChild(pre);
+      } catch {
+        body.innerHTML = '<p class="text-xs text-red-400 py-2 px-1">Failed to load note.</p>';
+      }
+    } else {
+      body.innerHTML = '';
+      const pre = document.createElement('pre');
+      pre.className = 'note-content text-gray-600 text-xs max-h-64 overflow-y-auto bg-gray-50 rounded p-2';
+      pre.textContent = tagNoteContentCache[note.path];
+      body.appendChild(pre);
+    }
+  }
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Tag description — debounced auto-save
+document.getElementById('tag-desc').addEventListener('input', e => {
+  if (currentTag) {
+    currentTag.description = e.target.value;
+    clearTimeout(tagSaveTimer);
+    tagSaveTimer = setTimeout(saveTagDescription, 700);
+  }
+});
+
+async function saveTagDescription() {
+  if (!currentTag) return;
+  const desc = document.getElementById('tag-desc').value;
+  await fetch('/api/tag-descriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag: currentTag.tag, description: desc }),
+  });
+  const tagInList = allTags.find(t => t.tag === currentTag.tag);
+  if (tagInList) tagInList.description = desc;
+  refreshTagList();
+  updateTagProgress();
+  flashSaved();
+}
+
+// Generate description
+document.getElementById('tag-generate-btn').addEventListener('click', async () => {
+  if (!currentTag) return;
+  const btn = document.getElementById('tag-generate-btn');
+  const sourceEl = document.getElementById('tag-generate-source');
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  sourceEl.textContent = '';
+  sourceEl.style.color = '';
+
+  try {
+    const res = await fetch('/api/tag-generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: currentTag.tag }),
+    });
+    if (!res.ok) {
+      const { error } = await res.json();
+      throw new Error(error || 'Unknown error');
+    }
+    const { description, sourceNotes } = await res.json();
+    document.getElementById('tag-desc').value = description;
+    currentTag.description = description;
+    const noteNames = sourceNotes
+      .map(p => p.split('/').pop().replace(/\\.md$/, ''))
+      .join(', ');
+    sourceEl.textContent = 'Based on ' + sourceNotes.length + ' note(s): ' + noteNames;
+    clearTimeout(tagSaveTimer);
+    await saveTagDescription();
+  } catch (err) {
+    sourceEl.textContent = 'Error: ' + err.message;
+    sourceEl.style.color = '#ef4444';
+    setTimeout(() => { sourceEl.style.color = ''; }, 4000);
+  } finally {
+    btn.disabled = currentTag ? currentTag.noteCount === 0 : true;
+    btn.textContent = '✨ Generate';
+  }
 });
 
 // ─── TagInput ──────────────────────────────────────────────────────────────
