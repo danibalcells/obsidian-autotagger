@@ -13,7 +13,6 @@ export class OpenAIAdapter implements LLMAdapter {
       request.tags,
       request.allowNewTags,
       request.newTagsNamespace,
-      request.ambiguities.length > 0
     );
     const userMessage = buildUserMessage(
       request.body,

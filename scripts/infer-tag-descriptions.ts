@@ -16,8 +16,8 @@ configDotenv({ path: ".env.eval" });
 
 import * as fs from "fs";
 import * as path from "path";
+import { loadTagDescriptions, saveTagDescriptions } from "./plugin-data";
 
-const TAG_DESCRIPTIONS_PATH = path.join("tests", "fixtures", "tag-descriptions.json");
 const DATA_PATH = path.join("tests", "fixtures", "data.json");
 const API_KEY = process.env.API_KEY ?? "";
 const MODEL = process.env.MODEL ?? "claude-sonnet-4-6";
@@ -38,11 +38,6 @@ function loadJson<T>(p: string, fallback: T): T {
   } catch {
     return fallback;
   }
-}
-
-function saveJson(p: string, data: unknown): void {
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(data, null, 2));
 }
 
 function buildTaxonomyContext(descs: Record<string, string>): string {
@@ -131,7 +126,7 @@ async function main(): Promise<void> {
   }
 
   const data = loadJson<{ tags: TagEntry[] }>(DATA_PATH, { tags: [] });
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
 
   const allRegistryTags = new Set(data.tags.map((t) => t.tag));
 
@@ -176,7 +171,7 @@ async function main(): Promise<void> {
 
     try {
       // Skip if already written (e.g. by the UI) since we started
-      const current = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+      const current = loadTagDescriptions();
       if (current[tag]) {
         console.log("skipped (already set)");
         continue;
@@ -186,7 +181,7 @@ async function main(): Promise<void> {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
       current[tag] = description;
-      saveJson(TAG_DESCRIPTIONS_PATH, current);
+      saveTagDescriptions(current);
       totalAdded++;
 
       console.log(`${elapsed}s → "${description}"`);

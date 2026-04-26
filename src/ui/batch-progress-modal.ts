@@ -36,11 +36,10 @@ export class BatchProgressModal extends Modal {
     });
   }
 
-  update(current: number, fileName: string): void {
-    this.progressEl.value = current;
-    this.statusEl.setText(
-      `Processing ${current} / ${this.total}: ${fileName}`
-    );
+  update(completed: number, inFlight: number): void {
+    this.progressEl.value = completed;
+    const inFlightText = inFlight > 0 ? ` · ${inFlight} in progress` : "";
+    this.statusEl.setText(`Completed ${completed} / ${this.total}${inFlightText}`);
   }
 
   showSummary(processed: number, skipped: number, errors: number): void {

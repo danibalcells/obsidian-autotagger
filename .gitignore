@@ -11,6 +11,6 @@ tests/fixtures/ground-truth.json
 tests/fixtures/ground-truth.*.bak.json
 tests/fixtures/sample.json
 tests/fixtures/annotation-meta.json
-tests/fixtures/tag-descriptions.json
+# tag-descriptions.json is no longer used — descriptions live in the vault plugin's data.json
 tests/fixtures/tag-examples.json
 tests/fixtures/new-tags-provenance.json

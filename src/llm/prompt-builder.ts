@@ -6,7 +6,6 @@ export function buildSystemPrompt(
   tags: TagEntry[],
   allowNewTags: boolean,
   newTagsNamespace: string,
-  hasAmbiguities: boolean
 ): string {
   const tagLines = tags
     .map((t) => {
@@ -19,14 +18,11 @@ export function buildSystemPrompt(
     ? `You MAY suggest new tags, but they must follow the namespace convention: start with "${newTagsNamespace}". Place them in "new_tags".`
     : 'Do NOT suggest new tags. Leave "new_tags" as an empty array.';
 
-  const disambiguationInstruction = hasAmbiguities
-    ? `
-For each entry in "ambiguities" below, pick exactly one of the listed canonical names and place it in "disambiguations" as { "surface": "...", "chosen": "..." }. If none of the options fit the context, use null.`
-    : "";
-
   return `${basePrompt}
 
-${newTagsInstruction}${disambiguationInstruction}
+${newTagsInstruction}
+
+For each entry in "ambiguities" below (if any), pick exactly one of the listed canonical names and place it in "disambiguations" as { "surface": "...", "chosen": "..." }. If none of the options fit the context, use null.
 
 You will also receive a list of entities already detected in the note. Do NOT repeat these in "extra_candidates".
 For any people, organizations, or places that are clearly named in the note text and NOT already detected, output them in "extra_candidates" using the name exactly as it appears in the text. Only include proper nouns — specific named individuals, organizations, or locations. Never include generic words like "person", "place", "organization", "someone", "people", "somewhere", etc.

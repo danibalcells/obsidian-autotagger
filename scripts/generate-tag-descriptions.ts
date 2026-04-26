@@ -6,7 +6,7 @@
  *   npm run generate-tags -- --min-notes=2 # skip tags with fewer than N notes
  *   npm run generate-tags -- --dry-run     # estimate cost without calling the API
  *
- * Saves progress to tests/fixtures/tag-descriptions.json after each tag.
+ * Reads and saves progress to the vault plugin's data.json (PLUGIN_DATA_PATH in .env.eval).
  * Safe to interrupt (Ctrl+C) and resume — already-generated tags are skipped.
  */
 
@@ -16,11 +16,11 @@ configDotenv({ path: ".env.eval" });
 import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
+import { loadTagDescriptions, saveTagDescriptions } from "./plugin-data";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? "";
 const API_KEY = process.env.API_KEY ?? "";
 const MODEL = process.env.MODEL ?? "claude-sonnet-4-6";
-const TAG_DESCRIPTIONS_PATH = path.join("tests", "fixtures", "tag-descriptions.json");
 const THINKING_BUDGET = 3000;
 const MAX_NOTES = 15;
 const MAX_WORDS_PER_NOTE = 1000;
@@ -42,21 +42,6 @@ if (!VAULT_PATH) {
 if (!API_KEY && !DRY_RUN) {
   console.error("API_KEY not set in .env.eval");
   process.exit(1);
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function loadJson<T>(p: string, fallback: T): T {
-  try {
-    return JSON.parse(fs.readFileSync(p, "utf-8")) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveJson(p: string, data: unknown): void {
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(data, null, 2));
 }
 
 // ─── Vault index ─────────────────────────────────────────────────────────────
@@ -252,7 +237,7 @@ async function main(): Promise<void> {
   const total = Object.values(index).reduce((s, v) => s + v.length, 0);
   console.log(`${Object.keys(index).length} tags, ${total} tag-note pairs`);
 
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
 
   const isExcluded = (tag: string): boolean =>
     EXCLUDE_PREFIXES.some((p) => tag.startsWith(p));
@@ -302,22 +287,22 @@ async function main(): Promise<void> {
     try {
       // Check under lock whether it was already written by another worker or the UI
       const alreadyDone = await writeLock.then(
-        () => !!loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {})[tag]
+        () => !!loadTagDescriptions()[tag]
       );
       if (alreadyDone) {
         console.log(`${prefix} — skipped (already set)`);
         return;
       }
 
-      const currentDescs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+      const currentDescs = loadTagDescriptions();
       const description = await generateDescription(tag, notes, currentDescs, index);
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
       // Serialize writes
       writeLock = writeLock.then(() => {
-        const d = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+        const d = loadTagDescriptions();
         d[tag] = description;
-        saveJson(TAG_DESCRIPTIONS_PATH, d);
+        saveTagDescriptions(d);
       });
       await writeLock;
 

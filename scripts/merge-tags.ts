@@ -1,5 +1,5 @@
 /**
- * Merge tags in tag-descriptions.json and ground-truth.json.
+ * Merge tags in the plugin's tag descriptions and ground-truth.json.
  *
  * Usage (edit MERGES below, then):
  *   npm run merge-tags
@@ -13,8 +13,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { LLMResponse } from "../src/types";
+import { loadTagDescriptions, saveTagDescriptions } from "./plugin-data";
 
-const TAG_DESCRIPTIONS_PATH = path.join("tests", "fixtures", "tag-descriptions.json");
 const GROUND_TRUTH_PATH = path.join("tests", "fixtures", "ground-truth.json");
 
 interface MergeSpec {
@@ -59,7 +59,7 @@ function combineDescriptions(descs: string[]): string {
   return unique.join("; ");
 }
 
-const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+const descs = loadTagDescriptions();
 const groundTruth = loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {});
 
 for (const { from, to, description } of MERGES) {
@@ -112,6 +112,6 @@ for (const { from, to, description } of MERGES) {
   console.log(`  ${notesUpdated} ground-truth note(s) updated`);
 }
 
-saveJson(TAG_DESCRIPTIONS_PATH, descs);
+saveTagDescriptions(descs);
 saveJson(GROUND_TRUTH_PATH, groundTruth);
-console.log("\nSaved tag-descriptions.json and ground-truth.json.");
+console.log("\nSaved tag descriptions to plugin data.json and ground-truth.json.");

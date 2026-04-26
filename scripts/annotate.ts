@@ -11,8 +11,9 @@
  *
  * Saves progress incrementally to tests/fixtures/:
  *   ground-truth.json     — { notePath: { tags, people, organizations, places } }
- *   tag-descriptions.json — { tag: "one-line description" }
  *   annotation-meta.json  — { notePath: { time_spent_ms, notes, added_new_tags, last_saved } }
+ *
+ * Tag descriptions are read/written from the vault plugin's data.json (PLUGIN_DATA_PATH in .env.eval).
  */
 
 import express from "express";
@@ -22,6 +23,7 @@ import * as net from "net";
 import { configDotenv } from "dotenv";
 import matter from "gray-matter";
 import type { RegistryContext } from "../src/types";
+import { loadTagDescriptions, saveTagDescriptions } from "./plugin-data";
 
 /** Ground truth entry shape written/read by the annotation UI. */
 interface AnnotationEntry {
@@ -37,7 +39,6 @@ configDotenv({ path: ".env.eval" });
 const SAMPLE_PATH = path.join("tests", "fixtures", "sample.json");
 const DATA_PATH = path.join("tests", "fixtures", "data.json");
 const GROUND_TRUTH_PATH = path.join("tests", "fixtures", "ground-truth.json");
-const TAG_DESCRIPTIONS_PATH = path.join("tests", "fixtures", "tag-descriptions.json");
 const ANNOTATION_META_PATH = path.join("tests", "fixtures", "annotation-meta.json");
 
 if (!fs.existsSync(SAMPLE_PATH)) {
@@ -155,7 +156,7 @@ async function generateTagDescription(
   tag: string
 ): Promise<{ description: string; sourceNotes: string[] }> {
   const index = getVaultTagIndex();
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
   const tagNotes = index[tag] ?? [];
   if (tagNotes.length === 0) throw new Error("No vault notes tagged with this tag");
 
@@ -322,7 +323,7 @@ app.get("/api/ground-truth", (_req, res) => {
 });
 
 app.get("/api/tag-descriptions", (_req, res) => {
-  res.json(loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {}));
+  res.json(loadTagDescriptions());
 });
 
 app.get("/api/annotation-meta", (_req, res) => {
@@ -350,11 +351,11 @@ app.post("/api/save/*notePath", (req, res) => {
   };
   saveJson(GROUND_TRUTH_PATH, gt);
 
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
   for (const [tag, desc] of Object.entries(body.tagDescriptions)) {
     if (desc.trim()) descs[tag] = desc.trim();
   }
-  saveJson(TAG_DESCRIPTIONS_PATH, descs);
+  saveTagDescriptions(descs);
 
   const meta = loadJson<Record<string, AnnotationMeta>>(ANNOTATION_META_PATH, {});
   const existing = meta[notePath];
@@ -381,7 +382,7 @@ app.delete("/api/ground-truth/*notePath", (req, res) => {
 
 app.get("/api/tags", (_req, res) => {
   const data = loadJson<RegistryContext>(DATA_PATH, { entities: [], tags: [] });
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
   const index = getVaultTagIndex();
 
   const allTagSet = new Set<string>([
@@ -425,13 +426,13 @@ app.get("/api/tag-notes", (req, res) => {
 app.post("/api/tag-descriptions", (req, res) => {
   const { tag, description } = req.body as { tag: string; description: string };
   if (!tag) return res.status(400).json({ error: "tag required" });
-  const descs = loadJson<Record<string, string>>(TAG_DESCRIPTIONS_PATH, {});
+  const descs = loadTagDescriptions();
   if (description && description.trim()) {
     descs[tag] = description.trim();
   } else {
     delete descs[tag];
   }
-  saveJson(TAG_DESCRIPTIONS_PATH, descs);
+  saveTagDescriptions(descs);
   res.json({ ok: true });
 });
 

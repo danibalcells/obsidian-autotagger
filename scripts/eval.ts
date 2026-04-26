@@ -33,6 +33,7 @@ import { configDotenv } from "dotenv";
 configDotenv({ path: ".env.eval" });
 import * as fs from "fs";
 import * as path from "path";
+import { loadTagDescriptions } from "./plugin-data";
 import { createLLMAdapter } from "../src/llm/index";
 import type {
   AutoTaggerSettings,
@@ -52,7 +53,6 @@ import { splitFrontmatter } from "../src/frontmatter";
 const SAMPLE_PATH = path.join("tests", "fixtures", "sample.json");
 const DATA_PATH = path.join("tests", "fixtures", "data.json");
 const GROUND_TRUTH_PATH = path.join("tests", "fixtures", "ground-truth.json");
-const TAG_DESCRIPTIONS_PATH = path.join("tests", "fixtures", "tag-descriptions.json");
 
 function requireFile(p: string): void {
   if (!fs.existsSync(p)) {
@@ -78,10 +78,7 @@ interface RegistryData {
 }
 
 const rawContext: RegistryData = JSON.parse(fs.readFileSync(DATA_PATH, "utf-8"));
-const tagDescriptions: Record<string, string> = loadJson<Record<string, string>>(
-  TAG_DESCRIPTIONS_PATH,
-  {}
-);
+const tagDescriptions: Record<string, string> = loadTagDescriptions();
 
 const excludeTagPrefixes = (process.env.EXCLUDE_TAG_PREFIXES ?? "type/,readwise")
   .split(",")

@@ -85,6 +85,7 @@ export default class AutoTaggerPlugin extends Plugin {
       callback: () => this.rebuildRegistry(),
     });
 
+
     this.app.workspace.onLayoutReady(async () => {
       await this.rebuildRegistry();
       if (this.settings.autoTag.enabled) {
@@ -183,7 +184,11 @@ export default class AutoTaggerPlugin extends Plugin {
         Object.assign(this.tagCache, cacheUpdates);
         await this.saveData_();
       },
-      () => this.resolveApiKey(this.settings.provider)
+      () => this.resolveApiKey(this.settings.provider),
+      async (path, timestamp) => {
+        this.tagCache[path] = timestamp;
+        await this.saveData_();
+      }
     ).catch((err) => {
       console.error("AutoTagger batch error:", err);
       new Notice(

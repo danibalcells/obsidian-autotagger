@@ -11,6 +11,7 @@ import { scanBody } from "./entity-scanner";
 import { injectWikilinks, resolvedEntitiesToSpanMatches } from "./wikilink-injector";
 import { resolveAndAssembleEntities } from "./commands/entity-pipeline";
 
+
 export class AutoTagger {
   private pendingTimers = new Map<string, number>();
   private sweepInterval: number | null = null;

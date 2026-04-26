@@ -8,34 +8,30 @@ const tags: TagEntry[] = [
 
 describe("buildSystemPrompt", () => {
   it("includes tag names and descriptions", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/", false);
+    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/");
     expect(prompt).toContain("tech/ai");
     expect(prompt).toContain("Artificial intelligence topics");
   });
 
   it("forbids new tags when allowNewTags is false", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/", false);
+    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/");
     expect(prompt).toContain("Do NOT suggest new tags");
   });
 
   it("allows new tags with namespace when allowNewTags is true", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, true, "topic/", false);
+    const prompt = buildSystemPrompt("Base prompt.\n", tags, true, "topic/");
     expect(prompt).toContain("topic/");
     expect(prompt).not.toContain("Do NOT suggest new tags");
   });
 
-  it("does not include disambiguation instruction when no ambiguities", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/", false);
-    expect(prompt).not.toContain("ambiguities");
-  });
-
-  it("includes disambiguation instruction when hasAmbiguities is true", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/", true);
+  it("always includes disambiguation instruction for stable prompt caching", () => {
+    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/");
+    expect(prompt).toContain("ambiguities");
     expect(prompt).toContain("disambiguations");
   });
 
   it("does NOT list entities in the system prompt", () => {
-    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/", false);
+    const prompt = buildSystemPrompt("Base prompt.\n", tags, false, "topic/");
     expect(prompt).not.toContain("Known entities");
     expect(prompt).not.toContain("[person]");
   });

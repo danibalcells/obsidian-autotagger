@@ -11,6 +11,38 @@ import { scanBody } from "../entity-scanner";
 import { injectWikilinks, resolvedEntitiesToSpanMatches } from "../wikilink-injector";
 import { resolveAndAssembleEntities } from "./entity-pipeline";
 
+const CONCURRENCY = 5;
+const MAX_RETRIES = 5;
+const BASE_RETRY_DELAY_MS = 2000;
+const MAX_RETRY_DELAY_MS = 30000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(err: unknown): boolean {
+  return (err as { status?: number })?.status === 429;
+}
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const base = Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, MAX_RETRY_DELAY_MS);
+        const jitter = Math.random() * base * 0.3;
+        await sleep(base + jitter);
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export async function batchTag(
   app: App,
   settings: AutoTaggerSettings,
@@ -22,7 +54,8 @@ export async function batchTag(
     lastRun: number,
     cacheUpdates: Record<string, number>
   ) => Promise<void>,
-  getApiKey: () => string
+  getApiKey: () => string,
+  onFileComplete?: (path: string, timestamp: number) => Promise<void>
 ): Promise<void> {
   const files = getFilesForScope(app, settings, scope, tagCache);
   if (files.length === 0) {
@@ -41,19 +74,12 @@ export async function batchTag(
   const excludePrefixes = settings.excludeTagPrefixes ?? [];
 
   let processed = 0;
-  let skipped = 0;
   let errors = 0;
   const cacheUpdates: Record<string, number> = {};
+  let nextIndex = 0;
+  let inFlight = 0;
 
-  for (let i = 0; i < files.length; i++) {
-    if (cancelled) {
-      skipped += files.length - i;
-      break;
-    }
-
-    const file = files[i];
-    modal.update(i + 1, file.name);
-
+  async function processFile(file: TFile): Promise<void> {
     try {
       const fullContent = await app.vault.read(file);
       const { body } = splitFrontmatter(fullContent);
@@ -67,30 +93,32 @@ export async function batchTag(
         .getEntries()
         .filter((t) => !excludePrefixes.some((p) => t.tag.startsWith(p)));
 
-      const llmResponse = await adapter.tag({
-        body,
-        title: file.basename,
-        existingTags,
-        detectedEntities: scan.unambiguous.map((m) => ({
-          canonical: m.candidates[0].canonicalName,
-          type: m.candidates[0].type,
-        })),
-        ambiguities: scan.ambiguous.map((m) => ({
-          surface: m.surface,
-          contextSnippet: body.slice(
-            Math.max(0, m.spanStart - 60),
-            Math.min(body.length, m.spanEnd + 60)
-          ),
-          options: m.candidates.map((c) => ({
-            canonical: c.canonicalName,
-            type: c.type,
-            description: c.description,
+      const llmResponse = await withRetry(() =>
+        adapter.tag({
+          body,
+          title: file.basename,
+          existingTags,
+          detectedEntities: scan.unambiguous.map((m) => ({
+            canonical: m.candidates[0].canonicalName,
+            type: m.candidates[0].type,
           })),
-        })),
-        tags,
-        allowNewTags,
-        newTagsNamespace: settings.newTagsNamespace,
-      });
+          ambiguities: scan.ambiguous.map((m) => ({
+            surface: m.surface,
+            contextSnippet: body.slice(
+              Math.max(0, m.spanStart - 60),
+              Math.min(body.length, m.spanEnd + 60)
+            ),
+            options: m.candidates.map((c) => ({
+              canonical: c.canonicalName,
+              type: c.type,
+              description: c.description,
+            })),
+          })),
+          tags,
+          allowNewTags,
+          newTagsNamespace: settings.newTagsNamespace,
+        })
+      );
 
       const resolved = resolveAndAssembleEntities(scan, llmResponse, entityRegistry, body);
 
@@ -108,14 +136,33 @@ export async function batchTag(
         }
       });
 
-      cacheUpdates[file.path] = Date.now();
+      const timestamp = Date.now();
+      cacheUpdates[file.path] = timestamp;
+      await onFileComplete?.(file.path, timestamp);
       processed++;
     } catch (err) {
       console.error(`AutoTagger: error on ${file.path}`, err);
       errors++;
     }
+
+    inFlight--;
+    modal.update(processed + errors, inFlight);
   }
 
+  async function worker(): Promise<void> {
+    while (!cancelled) {
+      const index = nextIndex++;
+      if (index >= files.length) break;
+      inFlight++;
+      modal.update(processed + errors, inFlight);
+      await processFile(files[index]);
+    }
+  }
+
+  const workerCount = Math.min(CONCURRENCY, files.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+
+  const skipped = files.length - processed - errors;
   await onComplete(Date.now(), cacheUpdates);
   modal.showSummary(processed, skipped, errors);
 }

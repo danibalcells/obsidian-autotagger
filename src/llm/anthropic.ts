@@ -13,7 +13,6 @@ export class AnthropicAdapter implements LLMAdapter {
       request.tags,
       request.allowNewTags,
       request.newTagsNamespace,
-      request.ambiguities.length > 0
     );
     const userMessage = buildUserMessage(
       request.body,
@@ -30,12 +29,19 @@ export class AnthropicAdapter implements LLMAdapter {
       headers: {
         "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         "content-type": "application/json",
       },
       body: JSON.stringify({
         model: this.settings.modelName,
         max_tokens: this.settings.maxOutputTokens,
-        system: systemPrompt,
+        system: [
+          {
+            type: "text",
+            text: systemPrompt,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
         messages: [{ role: "user", content: userMessage }],
       }),
     });
