@@ -18,11 +18,27 @@ export interface RegistryContext {
 }
 
 export interface LLMResponse {
-  people: string[];
-  organizations: string[];
-  places: string[];
   tags: string[];
   new_tags: string[];
+  disambiguations: { surface: string; chosen: string | null }[];
+  extra_candidates: {
+    people: string[];
+    organizations: string[];
+    places: string[];
+  };
+}
+
+/**
+ * A single fully-resolved entity ready for frontmatter and wikilink injection.
+ * spanStart/spanEnd are -1 when the entity has no body match (e.g. came from
+ * extra_candidates but had no text span to anchor to).
+ */
+export interface ResolvedEntity {
+  canonical: string;
+  type: "person" | "organization" | "place";
+  spanStart: number;
+  spanEnd: number;
+  surface: string;
 }
 
 export type LLMProvider = "openai" | "anthropic" | "google" | "ollama";
@@ -59,6 +75,13 @@ export interface AutoTaggerSettings {
   entityDescriptions: Record<string, string>;
   tagDescriptions: Record<string, string>;
   excludeTagPrefixes: string[];
+  /**
+   * Aliases shorter than this length require an exact case-sensitive match in
+   * the note text before they are linked. Set to 0 to disable (always
+   * case-insensitive). Default 5 protects common short aliases like "Anto",
+   * "John", "Luis" from matching lowercase occurrences.
+   */
+  entityAliasStrictCaseMinLength: number;
   lastBatchRun: number;
 }
 
@@ -97,6 +120,7 @@ export const DEFAULT_SETTINGS: AutoTaggerSettings = {
   entityDescriptions: {},
   tagDescriptions: {},
   excludeTagPrefixes: ["type/"],
+  entityAliasStrictCaseMinLength: 5,
   lastBatchRun: 0,
 };
 

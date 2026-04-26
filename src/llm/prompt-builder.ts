@@ -1,21 +1,14 @@
-import type { RegistryContext } from "../types";
+import type { TagEntry } from "../types";
+import type { Ambiguity, DetectedEntity } from "./types";
 
 export function buildSystemPrompt(
   basePrompt: string,
-  context: RegistryContext,
+  tags: TagEntry[],
   allowNewTags: boolean,
-  newTagsNamespace: string
+  newTagsNamespace: string,
+  hasAmbiguities: boolean
 ): string {
-  const entityLines = context.entities
-    .map((e) => {
-      const aliasStr =
-        e.aliases.length > 0 ? ` (aliases: ${e.aliases.join(", ")})` : "";
-      const descStr = e.description ? ` — ${e.description}` : "";
-      return `  - [${e.type}] ${e.canonicalName}${aliasStr}${descStr}`;
-    })
-    .join("\n");
-
-  const tagLines = context.tags
+  const tagLines = tags
     .map((t) => {
       const descStr = t.description ? ` — ${t.description}` : "";
       return `  - ${t.tag}${descStr}`;
@@ -26,44 +19,76 @@ export function buildSystemPrompt(
     ? `You MAY suggest new tags, but they must follow the namespace convention: start with "${newTagsNamespace}". Place them in "new_tags".`
     : 'Do NOT suggest new tags. Leave "new_tags" as an empty array.';
 
+  const disambiguationInstruction = hasAmbiguities
+    ? `
+For each entry in "ambiguities" below, pick exactly one of the listed canonical names and place it in "disambiguations" as { "surface": "...", "chosen": "..." }. If none of the options fit the context, use null.`
+    : "";
+
   return `${basePrompt}
 
-${newTagsInstruction}
+${newTagsInstruction}${disambiguationInstruction}
 
-Known entities:
-${entityLines || "  (none)"}
+You will also receive a list of entities already detected in the note. Do NOT repeat these in "extra_candidates".
+For any people, organizations, or places that are clearly named in the note text and NOT already detected, output them in "extra_candidates" using the name exactly as it appears in the text. Only include proper nouns — specific named individuals, organizations, or locations. Never include generic words like "person", "place", "organization", "someone", "people", "somewhere", etc.
 
 Known tags:
 ${tagLines || "  (none)"}
 
 Respond with JSON matching exactly this schema:
 {
-  "people": ["canonical name of person"],
-  "organizations": ["canonical name of organization"],
-  "places": ["canonical name of place"],
   "tags": ["existing-tag"],
-  "new_tags": ["topic/new-tag"]
+  "new_tags": ["topic/new-tag"],
+  "disambiguations": [{ "surface": "...", "chosen": "canonical name or null" }],
+  "extra_candidates": {
+    "people": ["Name as written"],
+    "organizations": ["Name as written"],
+    "places": ["Name as written"]
+  }
 }`;
 }
 
 export function buildUserMessage(
-  content: string,
+  body: string,
+  title: string | undefined,
   maxInputTokens: number,
   existingTags: string[],
-  title?: string
+  detectedEntities: DetectedEntity[],
+  ambiguities: Ambiguity[]
 ): string {
   const charLimit = maxInputTokens * 4;
   const truncated =
-    content.length > charLimit
-      ? content.slice(0, charLimit) + "\n[... content truncated ...]"
-      : content;
+    body.length > charLimit
+      ? body.slice(0, charLimit) + "\n[... content truncated ...]"
+      : body;
 
   const titleLine = title ? `Note title: ${title}\n\n` : "";
 
   const existingTagsLine =
     existingTags.length > 0
-      ? `\n\nAlready applied tags: ${existingTags.join(", ")}\nOnly suggest tags that are NOT already listed above.`
+      ? `\nAlready applied tags: ${existingTags.join(", ")}\nOnly suggest tags NOT already listed above.\n`
       : "";
 
-  return `${titleLine}Note content:\n\n${truncated}${existingTagsLine}`;
+  const detectedLine =
+    detectedEntities.length > 0
+      ? `\nAlready detected entities:\n${detectedEntities
+          .map((e) => `  - [${e.type}] ${e.canonical}`)
+          .join("\n")}\n`
+      : "";
+
+  const ambiguitiesLine =
+    ambiguities.length > 0
+      ? `\nAmbiguities to resolve:\n${ambiguities
+          .map(
+            (a) =>
+              `  surface: "${a.surface}"\n  context: "${a.contextSnippet}"\n  options:\n${a.options
+                .map(
+                  (o) =>
+                    `    - ${o.canonical} [${o.type}]${o.description ? `: ${o.description}` : ""}`
+                )
+                .join("\n")}`
+          )
+          .join("\n\n")}\n`
+      : "";
+
+  return `${titleLine}Note content:\n\n${truncated}${existingTagsLine}${detectedLine}${ambiguitiesLine}`;
 }

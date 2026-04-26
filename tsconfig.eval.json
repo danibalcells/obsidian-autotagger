@@ -13,6 +13,9 @@
   "include": [
     "scripts/**/*.ts",
     "src/types.ts",
-    "src/llm/**/*.ts"
+    "src/llm/**/*.ts",
+    "src/entity-scanner.ts",
+    "src/frontmatter.ts",
+    "src/registry/entity-registry.ts"
   ]
 }

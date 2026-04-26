@@ -3,9 +3,13 @@ import type { App, TAbstractFile } from "obsidian";
 import type { AutoTaggerSettings } from "./types";
 import type { EntityRegistry } from "./registry/entity-registry";
 import type { TagRegistry } from "./registry/tag-registry";
+import type { Ambiguity, DetectedEntity } from "./llm/types";
 import { createLLMAdapter } from "./llm";
-import { mergeFrontmatter } from "./frontmatter";
+import { mergeFrontmatter, splitFrontmatter } from "./frontmatter";
 import { withPreservedMtime } from "./mtime";
+import { scanBody } from "./entity-scanner";
+import { injectWikilinks, resolvedEntitiesToSpanMatches } from "./wikilink-injector";
+import { resolveAndAssembleEntities } from "./commands/entity-pipeline";
 
 export class AutoTagger {
   private pendingTimers = new Map<string, number>();
@@ -64,8 +68,7 @@ export class AutoTagger {
 
     const intervalMs = settings.autoTag.checkIntervalMinutes * 60 * 1000;
     this.sweepInterval = window.setInterval(() => {
-      // Debounce timers handle tagging; this interval is a heartbeat
-      // for future polling-based enhancements (e.g., files modified before load).
+      // Heartbeat for future polling-based enhancements.
     }, intervalMs);
   }
 
@@ -92,37 +95,78 @@ export class AutoTagger {
   }
 
   async tagFile(file: TFile): Promise<void> {
-    // Skip if already tagged after the file's last modification
     const tagCache = this.getTagCache();
     const lastTagged = tagCache[file.path] ?? 0;
     if (lastTagged >= file.stat.mtime) return;
 
     const settings = this.getSettings();
-    const excludePrefixes = settings.excludeTagPrefixes ?? [];
-    const context = {
-      entities: this.entityRegistry.getEntries(),
-      tags: this.tagRegistry.getEntries().filter(
-        (t) => !excludePrefixes.some((p) => t.tag.startsWith(p))
-      ),
-    };
+    const fullContent = await this.app.vault.read(file);
+    const { body } = splitFrontmatter(fullContent);
 
-    const adapter = createLLMAdapter(settings, this.getApiKey());
-    const content = await this.app.vault.read(file);
     const fileCache = this.app.metadataCache.getFileCache(file);
     const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
-    const response = await adapter.tag(content, context, existingTags, file.basename);
+    const excludePrefixes = settings.excludeTagPrefixes ?? [];
+
+    // 1. Rule-based entity scan over the body
+    const entries = this.entityRegistry.getEntries();
+    const scan = scanBody(body, entries, settings.entityAliasStrictCaseMinLength);
+
+    const detectedEntities: DetectedEntity[] = scan.unambiguous.map((m) => ({
+      canonical: m.candidates[0].canonicalName,
+      type: m.candidates[0].type,
+    }));
+
+    const ambiguities: Ambiguity[] = scan.ambiguous.map((m) => ({
+      surface: m.surface,
+      contextSnippet: body.slice(
+        Math.max(0, m.spanStart - 60),
+        Math.min(body.length, m.spanEnd + 60)
+      ),
+      options: m.candidates.map((c) => ({
+        canonical: c.canonicalName,
+        type: c.type,
+        description: c.description,
+      })),
+    }));
+
+    // 2. LLM call (no full entity dump — just tags + disambiguation)
+    const tags = this.tagRegistry
+      .getEntries()
+      .filter((t) => !excludePrefixes.some((p) => t.tag.startsWith(p)));
     const allowNewTags = settings.newTagsPolicy === "allow-suggestions";
 
+    const adapter = createLLMAdapter(settings, this.getApiKey());
+    const llmResponse = await adapter.tag({
+      body,
+      title: file.basename,
+      existingTags,
+      detectedEntities,
+      ambiguities,
+      tags,
+      allowNewTags,
+      newTagsNamespace: settings.newTagsNamespace,
+    });
+
+    // 3. Resolve all entities into a unified list
+    const resolved = resolveAndAssembleEntities(scan, llmResponse, this.entityRegistry, body);
+
+    // 4. Write frontmatter + body wikilinks in one mtime-preserved block
     await withPreservedMtime(this.app, file, settings.preserveMtime, async () => {
-      await mergeFrontmatter(
-        this.app,
-        file,
-        response,
-        this.entityRegistry,
-        allowNewTags
-      );
+      await mergeFrontmatter(this.app, file, llmResponse, resolved, allowNewTags);
+
+      const spanMatches = resolvedEntitiesToSpanMatches(resolved);
+      if (spanMatches.length > 0) {
+        // Read fresh after processFrontMatter modified the file
+        const updated = await this.app.vault.read(file);
+        const { header, body: currentBody } = splitFrontmatter(updated);
+        const newBody = injectWikilinks(currentBody, spanMatches);
+        if (newBody !== currentBody) {
+          await this.app.vault.modify(file, header + newBody);
+        }
+      }
     });
 
     await this.onTagged(file.path, Date.now());
   }
+
 }

@@ -21,7 +21,16 @@ import * as path from "path";
 import * as net from "net";
 import { configDotenv } from "dotenv";
 import matter from "gray-matter";
-import type { RegistryContext, LLMResponse } from "../src/types";
+import type { RegistryContext } from "../src/types";
+
+/** Ground truth entry shape written/read by the annotation UI. */
+interface AnnotationEntry {
+  people: string[];
+  organizations: string[];
+  places: string[];
+  tags: string[];
+  new_tags: string[];
+}
 
 configDotenv({ path: ".env.eval" });
 
@@ -288,7 +297,7 @@ app.use(express.json());
 // ─── Annotate API ─────────────────────────────────────────────────────────────
 
 app.get("/api/sample", (_req, res) => {
-  const gt = loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {});
+  const gt = loadJson<Record<string, AnnotationEntry>>(GROUND_TRUTH_PATH, {});
   res.json({
     notes: sampleFile.notes.map((n) => ({
       ...n,
@@ -309,7 +318,7 @@ app.get("/api/data", (_req, res) => {
 });
 
 app.get("/api/ground-truth", (_req, res) => {
-  res.json(loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {}));
+  res.json(loadJson<Record<string, AnnotationEntry>>(GROUND_TRUTH_PATH, {}));
 });
 
 app.get("/api/tag-descriptions", (_req, res) => {
@@ -321,7 +330,7 @@ app.get("/api/annotation-meta", (_req, res) => {
 });
 
 interface SavePayload {
-  annotation: Omit<LLMResponse, "new_tags">;
+  annotation: Omit<AnnotationEntry, "new_tags">;
   newTags: string[];
   tagDescriptions: Record<string, string>;
   meta: { time_spent_ms: number; notes: string; added_new_tags: boolean };
@@ -331,7 +340,7 @@ app.post("/api/save/*notePath", (req, res) => {
   const notePath = [req.params.notePath].flat().join("/");
   const body = req.body as SavePayload;
 
-  const gt = loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {});
+  const gt = loadJson<Record<string, AnnotationEntry>>(GROUND_TRUTH_PATH, {});
   gt[notePath] = {
     people: body.annotation.people,
     organizations: body.annotation.organizations,
@@ -362,7 +371,7 @@ app.post("/api/save/*notePath", (req, res) => {
 
 app.delete("/api/ground-truth/*notePath", (req, res) => {
   const notePath = [req.params.notePath].flat().join("/");
-  const gt = loadJson<Record<string, LLMResponse>>(GROUND_TRUTH_PATH, {});
+  const gt = loadJson<Record<string, AnnotationEntry>>(GROUND_TRUTH_PATH, {});
   delete gt[notePath];
   saveJson(GROUND_TRUTH_PATH, gt);
   res.json({ ok: true });

@@ -4,9 +4,12 @@ import type { AutoTaggerSettings, BatchScope } from "../types";
 import type { EntityRegistry } from "../registry/entity-registry";
 import type { TagRegistry } from "../registry/tag-registry";
 import { createLLMAdapter } from "../llm";
-import { mergeFrontmatter } from "../frontmatter";
+import { mergeFrontmatter, splitFrontmatter } from "../frontmatter";
 import { withPreservedMtime } from "../mtime";
 import { BatchProgressModal } from "../ui/batch-progress-modal";
+import { scanBody } from "../entity-scanner";
+import { injectWikilinks, resolvedEntitiesToSpanMatches } from "../wikilink-injector";
+import { resolveAndAssembleEntities } from "./entity-pipeline";
 
 export async function batchTag(
   app: App,
@@ -33,12 +36,9 @@ export async function batchTag(
   });
   modal.open();
 
-  const context = {
-    entities: entityRegistry.getEntries(),
-    tags: tagRegistry.getEntries(),
-  };
   const adapter = createLLMAdapter(settings, getApiKey());
   const allowNewTags = settings.newTagsPolicy === "allow-suggestions";
+  const excludePrefixes = settings.excludeTagPrefixes ?? [];
 
   let processed = 0;
   let skipped = 0;
@@ -55,13 +55,57 @@ export async function batchTag(
     modal.update(i + 1, file.name);
 
     try {
-      const content = await app.vault.read(file);
+      const fullContent = await app.vault.read(file);
+      const { body } = splitFrontmatter(fullContent);
       const fileCache = app.metadataCache.getFileCache(file);
       const existingTags: string[] = fileCache?.frontmatter?.tags ?? [];
-      const response = await adapter.tag(content, context, existingTags);
+
+      const entries = entityRegistry.getEntries();
+      const scan = scanBody(body, entries, settings.entityAliasStrictCaseMinLength);
+
+      const tags = tagRegistry
+        .getEntries()
+        .filter((t) => !excludePrefixes.some((p) => t.tag.startsWith(p)));
+
+      const llmResponse = await adapter.tag({
+        body,
+        title: file.basename,
+        existingTags,
+        detectedEntities: scan.unambiguous.map((m) => ({
+          canonical: m.candidates[0].canonicalName,
+          type: m.candidates[0].type,
+        })),
+        ambiguities: scan.ambiguous.map((m) => ({
+          surface: m.surface,
+          contextSnippet: body.slice(
+            Math.max(0, m.spanStart - 60),
+            Math.min(body.length, m.spanEnd + 60)
+          ),
+          options: m.candidates.map((c) => ({
+            canonical: c.canonicalName,
+            type: c.type,
+            description: c.description,
+          })),
+        })),
+        tags,
+        allowNewTags,
+        newTagsNamespace: settings.newTagsNamespace,
+      });
+
+      const resolved = resolveAndAssembleEntities(scan, llmResponse, entityRegistry, body);
 
       await withPreservedMtime(app, file, settings.preserveMtime, async () => {
-        await mergeFrontmatter(app, file, response, entityRegistry, allowNewTags);
+        await mergeFrontmatter(app, file, llmResponse, resolved, allowNewTags);
+
+        const spanMatches = resolvedEntitiesToSpanMatches(resolved);
+        if (spanMatches.length > 0) {
+          const updated = await app.vault.read(file);
+          const { header, body: currentBody } = splitFrontmatter(updated);
+          const newBody = injectWikilinks(currentBody, spanMatches);
+          if (newBody !== currentBody) {
+            await app.vault.modify(file, header + newBody);
+          }
+        }
       });
 
       cacheUpdates[file.path] = Date.now();

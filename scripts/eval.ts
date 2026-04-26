@@ -34,15 +34,18 @@ configDotenv({ path: ".env.eval" });
 import * as fs from "fs";
 import * as path from "path";
 import { createLLMAdapter } from "../src/llm/index";
-import { buildSystemPrompt, buildUserMessage } from "../src/llm/prompt-builder";
 import type {
   AutoTaggerSettings,
+  EntityEntry,
   LLMProvider,
-  LLMResponse,
   NewTagsPolicy,
-  RegistryContext,
+  ResolvedEntity,
+  TagEntry,
 } from "../src/types";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/types";
+import { scanBody } from "../src/entity-scanner";
+import { resolveCanonicalName, stringSimilarity } from "../src/registry/entity-registry";
+import { splitFrontmatter } from "../src/frontmatter";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -69,7 +72,12 @@ function loadJson<T>(p: string, fallback: T): T {
   }
 }
 
-const rawContext: RegistryContext = JSON.parse(fs.readFileSync(DATA_PATH, "utf-8"));
+interface RegistryData {
+  entities: EntityEntry[];
+  tags: TagEntry[];
+}
+
+const rawContext: RegistryData = JSON.parse(fs.readFileSync(DATA_PATH, "utf-8"));
 const tagDescriptions: Record<string, string> = loadJson<Record<string, string>>(
   TAG_DESCRIPTIONS_PATH,
   {}
@@ -80,18 +88,23 @@ const excludeTagPrefixes = (process.env.EXCLUDE_TAG_PREFIXES ?? "type/,readwise"
   .map((s) => s.trim())
   .filter(Boolean);
 
-// Merge human-authored tag descriptions into the registry context, excluding tag prefixes
-const context: RegistryContext = {
-  ...rawContext,
-  tags: rawContext.tags
-    .filter((t) => !excludeTagPrefixes.some((p) => t.tag.startsWith(p)))
-    .map((t) => ({
-      ...t,
-      description: tagDescriptions[t.tag] ?? t.description,
-    })),
-};
+const STRICT_CASE_MIN_LENGTH = Number(process.env.ENTITY_ALIAS_STRICT_CASE_MIN_LENGTH ?? 5);
+const FUZZY_HIGH = Number(process.env.ENTITY_FUZZY_HIGH ?? 0.92);
 
-const groundTruth: Record<string, LLMResponse> = JSON.parse(
+const allEntities: EntityEntry[] = rawContext.entities;
+const filteredTags: TagEntry[] = rawContext.tags
+  .filter((t) => !excludeTagPrefixes.some((p) => t.tag.startsWith(p)))
+  .map((t) => ({ ...t, description: tagDescriptions[t.tag] ?? t.description }));
+
+interface GroundTruth {
+  people: string[];
+  organizations: string[];
+  places: string[];
+  tags: string[];
+  new_tags?: string[];
+}
+
+const groundTruth: Record<string, GroundTruth> = JSON.parse(
   fs.readFileSync(GROUND_TRUTH_PATH, "utf-8")
 );
 
@@ -148,6 +161,7 @@ const settings: AutoTaggerSettings = {
   entityDescriptions: {},
   tagDescriptions: {},
   excludeTagPrefixes,
+  entityAliasStrictCaseMinLength: STRICT_CASE_MIN_LENGTH,
   lastBatchRun: 0,
 };
 
@@ -179,6 +193,19 @@ function normalize(s: string): string {
 type Category = "people" | "organizations" | "places" | "tags";
 const CATEGORIES: Category[] = ["people", "organizations", "places", "tags"];
 
+interface AssembledPrediction {
+  people: string[];
+  organizations: string[];
+  places: string[];
+  tags: string[];
+  new_tags: string[];
+  /** entity resolution attribution for logging */
+  ruleMatched: number;
+  disambiguated: number;
+  extraFromLLM: number;
+  promptTokensEstimate: number;
+}
+
 function computePRF(
   predicted: string[],
   truth: string[]
@@ -202,8 +229,8 @@ function computePRF(
 }
 
 function computeNoteMetrics(
-  predicted: LLMResponse,
-  truth: LLMResponse
+  predicted: AssembledPrediction,
+  truth: GroundTruth
 ): {
   overall: { precision: number; recall: number; f1: number };
   byCategory: Record<Category, { precision: number; recall: number; f1: number; tp: number; fp: string[]; fn: string[] }>;
@@ -220,17 +247,79 @@ function computeNoteMetrics(
     ...truth.organizations,
     ...truth.places,
     ...truth.tags,
-    ...truth.new_tags,
+    ...(truth.new_tags ?? []),
   ];
 
   const overall = computePRF(allPred, allTruth);
 
   const byCategory = {} as Record<Category, ReturnType<typeof computePRF>>;
-  for (const cat of CATEGORIES) {
-    byCategory[cat] = computePRF(predicted[cat] ?? [], truth[cat] ?? []);
-  }
+  byCategory.people = computePRF(predicted.people, truth.people ?? []);
+  byCategory.organizations = computePRF(predicted.organizations, truth.organizations ?? []);
+  byCategory.places = computePRF(predicted.places, truth.places ?? []);
+  byCategory.tags = computePRF(
+    [...predicted.tags, ...predicted.new_tags],
+    [...(truth.tags ?? []), ...(truth.new_tags ?? [])]
+  );
 
   return { overall, byCategory };
+}
+
+/**
+ * Assemble a flat prediction from the scanner + LLM response, mirroring the
+ * logic in AutoTagger.resolveEntities (minus the Obsidian vault writes).
+ */
+function assembleEntities(
+  body: string,
+  scan: ReturnType<typeof scanBody>,
+  llmResponse: import("../src/types").LLMResponse
+): ResolvedEntity[] {
+  const resolved: ResolvedEntity[] = [];
+  const seen = new Set<string>();
+
+  const add = (e: ResolvedEntity) => {
+    if (!seen.has(e.canonical.toLowerCase())) {
+      seen.add(e.canonical.toLowerCase());
+      resolved.push(e);
+    }
+  };
+
+  for (const m of scan.unambiguous) {
+    const entry = m.candidates[0];
+    add({ canonical: entry.canonicalName, type: entry.type, spanStart: m.spanStart, spanEnd: m.spanEnd, surface: m.surface });
+  }
+
+  for (const d of llmResponse.disambiguations) {
+    if (!d.chosen) continue;
+    const ambig = scan.ambiguous.find((m) => m.surface.toLowerCase() === d.surface.toLowerCase());
+    if (!ambig) continue;
+    const entry = ambig.candidates.find((c) => c.canonicalName.toLowerCase() === d.chosen!.toLowerCase());
+    if (!entry) continue;
+    add({ canonical: entry.canonicalName, type: entry.type, spanStart: ambig.spanStart, spanEnd: ambig.spanEnd, surface: ambig.surface });
+  }
+
+  const extras = [
+    ...llmResponse.extra_candidates.people.map((n) => ({ name: n, type: "person" as const })),
+    ...llmResponse.extra_candidates.organizations.map((n) => ({ name: n, type: "organization" as const })),
+    ...llmResponse.extra_candidates.places.map((n) => ({ name: n, type: "place" as const })),
+  ];
+
+  for (const { name, type } of extras) {
+    const exact = resolveCanonicalName(allEntities, name);
+    const canonical = exact ?? ((): string => {
+      let bestScore = -1;
+      let bestCanonical = name;
+      for (const entry of allEntities) {
+        for (const term of [entry.canonicalName, ...entry.aliases]) {
+          const score = stringSimilarity(name, term);
+          if (score > bestScore) { bestScore = score; bestCanonical = entry.canonicalName; }
+        }
+      }
+      return bestScore >= FUZZY_HIGH ? bestCanonical : name;
+    })();
+    add({ canonical, type, spanStart: -1, spanEnd: -1, surface: "" });
+  }
+
+  return resolved;
 }
 
 // ─── Formatting ───────────────────────────────────────────────────────────────
@@ -263,82 +352,106 @@ type NoteResult = {
   category: string;
   overall: { precision: number; recall: number; f1: number };
   byCategory: Record<Category, { precision: number; recall: number; f1: number; tp: number; fp: string[]; fn: string[] }>;
+  assembled?: AssembledPrediction;
   error?: string;
 };
 
 const allowNew = settings.newTagsPolicy === "allow-suggestions";
+
+const emptyByCategory = () =>
+  Object.fromEntries(
+    CATEGORIES.map((c) => [c, { precision: 0, recall: 0, f1: 0, tp: 0, fp: [] as string[], fn: [] as string[] }])
+  ) as unknown as Record<Category, ReturnType<typeof computePRF>>;
 
 async function tagNote(notePath: string, category: string): Promise<NoteResult> {
   const absPath = path.join(vaultPath, notePath);
   if (!fs.existsSync(absPath)) {
     const error = `File not found: ${absPath}`;
     process.stdout.write(`  ✗ ${notePath}\n`);
-    return {
-      notePath,
-      category,
-      overall: { precision: 0, recall: 0, f1: 0 },
-      byCategory: Object.fromEntries(
-        CATEGORIES.map((c) => [c, { precision: 0, recall: 0, f1: 0, tp: 0, fp: [] as string[], fn: [] as string[] }])
-      ) as unknown as Record<Category, ReturnType<typeof computePRF>>,
-      error,
-    };
+    return { notePath, category, overall: { precision: 0, recall: 0, f1: 0 }, byCategory: emptyByCategory(), error };
   }
 
-  const content = fs.readFileSync(absPath, "utf-8");
+  const fullContent = fs.readFileSync(absPath, "utf-8");
+  const { body } = splitFrontmatter(fullContent);
   const truth = groundTruth[notePath];
+  const title = path.basename(notePath, ".md");
 
-  const systemPrompt = buildSystemPrompt(
-    settings.systemPrompt,
-    context,
-    allowNew,
-    settings.newTagsNamespace
-  );
-  const userMessage = buildUserMessage(content, settings.maxInputTokens, []);
+  // Rule-based entity scan
+  const scan = scanBody(body, allEntities, STRICT_CASE_MIN_LENGTH);
+
+  const detectedEntities = scan.unambiguous.map((m) => ({
+    canonical: m.candidates[0].canonicalName,
+    type: m.candidates[0].type,
+  }));
+
+  const ambiguities = scan.ambiguous.map((m) => ({
+    surface: m.surface,
+    contextSnippet: body.slice(Math.max(0, m.spanStart - 60), Math.min(body.length, m.spanEnd + 60)),
+    options: m.candidates.map((c) => ({ canonical: c.canonicalName, type: c.type, description: c.description })),
+  }));
 
   const trace = langfuse?.trace({
-    name: `eval/${path.basename(notePath)}`,
-    input: { note: content.slice(0, 500) },
+    name: `eval/${title}`,
+    input: { note: body.slice(0, 500) },
     metadata: { provider: settings.provider, model: settings.modelName, notePath },
   });
 
   const generation = trace?.generation({
     name: "tag",
     model: settings.modelName,
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ],
+    input: { detectedEntities, ambiguities: ambiguities.length, title },
   });
 
-  let predicted: LLMResponse;
+  let llmResponse: import("../src/types").LLMResponse;
   try {
-    predicted = await adapter.tag(content, context, [], path.basename(notePath, ".md"));
+    llmResponse = await adapter.tag({
+      body,
+      title,
+      existingTags: [],
+      detectedEntities,
+      ambiguities,
+      tags: filteredTags,
+      allowNewTags: allowNew,
+      newTagsNamespace: settings.newTagsNamespace,
+    });
   } catch (err) {
     const error = String(err);
     generation?.end({ output: { error }, level: "ERROR" });
     trace?.update({ output: { error } });
     process.stdout.write(`  ✗ ${notePath}\n`);
-    return {
-      notePath,
-      category,
-      overall: { precision: 0, recall: 0, f1: 0 },
-      byCategory: Object.fromEntries(
-        CATEGORIES.map((c) => [c, { precision: 0, recall: 0, f1: 0, tp: 0, fp: [] as string[], fn: [] as string[] }])
-      ) as unknown as Record<Category, ReturnType<typeof computePRF>>,
-      error,
-    };
+    return { notePath, category, overall: { precision: 0, recall: 0, f1: 0 }, byCategory: emptyByCategory(), error };
   }
 
-  const { overall, byCategory } = computeNoteMetrics(predicted, truth);
+  const resolved = assembleEntities(body, scan, llmResponse);
+  const assembled: AssembledPrediction = {
+    people: resolved.filter((e) => e.type === "person").map((e) => e.canonical),
+    organizations: resolved.filter((e) => e.type === "organization").map((e) => e.canonical),
+    places: resolved.filter((e) => e.type === "place").map((e) => e.canonical),
+    tags: llmResponse.tags,
+    new_tags: llmResponse.new_tags,
+    ruleMatched: scan.unambiguous.length,
+    disambiguated: llmResponse.disambiguations.filter((d) => d.chosen).length,
+    extraFromLLM:
+      llmResponse.extra_candidates.people.length +
+      llmResponse.extra_candidates.organizations.length +
+      llmResponse.extra_candidates.places.length,
+    promptTokensEstimate:
+      // rough estimate: entity dump removed, ambiguity context added
+      (detectedEntities.length * 5) +
+      (ambiguities.length * 40) +
+      filteredTags.length * 8,
+  };
 
-  generation?.end({ output: predicted });
+  const { overall, byCategory } = computeNoteMetrics(assembled, truth);
+
+  generation?.end({ output: assembled });
   trace?.score({ name: "precision", value: overall.precision });
   trace?.score({ name: "recall", value: overall.recall });
   trace?.score({ name: "f1", value: overall.f1 });
-  trace?.update({ output: predicted });
+  trace?.update({ output: assembled });
 
-  process.stdout.write(`  ✓ ${notePath}\n`);
-  return { notePath, category, overall, byCategory };
+  process.stdout.write(`  ✓ ${notePath}  [rule:${assembled.ruleMatched} disambig:${assembled.disambiguated} llm-extra:${assembled.extraFromLLM}]\n`);
+  return { notePath, category, overall, byCategory, assembled };
 }
 
 // Run with bounded concurrency
@@ -431,9 +544,14 @@ console.log(SEP);
 for (const cat of CATEGORIES) {
   const withSupport = successful.filter((r) => {
     const truth = groundTruth[r.notePath];
-    return (truth[cat]?.length ?? 0) > 0;
+    const arr = cat === "tags" ? [...(truth.tags ?? []), ...(truth.new_tags ?? [])] : (truth[cat as keyof GroundTruth] as string[] ?? []);
+    return arr.length > 0;
   });
-  const support = withSupport.reduce((s, r) => s + (groundTruth[r.notePath][cat]?.length ?? 0), 0);
+  const support = withSupport.reduce((s, r) => {
+    const truth = groundTruth[r.notePath];
+    const arr = cat === "tags" ? [...(truth.tags ?? []), ...(truth.new_tags ?? [])] : (truth[cat as keyof GroundTruth] as string[] ?? []);
+    return s + arr.length;
+  }, 0);
   const p = avg(withSupport.map((r) => r.byCategory[cat].precision));
   const rec = avg(withSupport.map((r) => r.byCategory[cat].recall));
   const f = avg(withSupport.map((r) => r.byCategory[cat].f1));
@@ -553,6 +671,21 @@ for (const r of worst) {
   console.log(
     `  ${pct(r.overall.f1).padStart(4)}  ${path.basename(r.notePath).replace(/\.md$/, "")}`
   );
+}
+
+// ─── Entity resolution attribution ───────────────────────────────────────────
+
+const withAssembled = successful.filter((r) => r.assembled);
+if (withAssembled.length > 0) {
+  const totalRule = withAssembled.reduce((s, r) => s + (r.assembled?.ruleMatched ?? 0), 0);
+  const totalDisambig = withAssembled.reduce((s, r) => s + (r.assembled?.disambiguated ?? 0), 0);
+  const totalExtra = withAssembled.reduce((s, r) => s + (r.assembled?.extraFromLLM ?? 0), 0);
+  console.log("\n" + SEP);
+  console.log("ENTITY RESOLUTION ATTRIBUTION");
+  console.log(SEP);
+  console.log(`  Rule-based (unambiguous)  ${totalRule.toString().padStart(5)}  (${pct(totalRule / (totalRule + totalDisambig + totalExtra))})`);
+  console.log(`  LLM disambiguation        ${totalDisambig.toString().padStart(5)}  (${pct(totalDisambig / (totalRule + totalDisambig + totalExtra))})`);
+  console.log(`  LLM extra_candidates      ${totalExtra.toString().padStart(5)}  (${pct(totalExtra / (totalRule + totalDisambig + totalExtra))})`);
 }
 
 console.log("\n" + SEP + "\n");

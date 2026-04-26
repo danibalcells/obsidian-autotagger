@@ -1,21 +1,28 @@
 import { requestUrl } from "obsidian";
-import type { LLMAdapter } from "./types";
-import type { AutoTaggerSettings, LLMResponse, RegistryContext } from "../types";
+import type { LLMAdapter, LLMTagRequest } from "./types";
+import type { AutoTaggerSettings, LLMResponse } from "../types";
 import { buildSystemPrompt, buildUserMessage } from "./prompt-builder";
 import { parseLLMResponse } from "./parser";
 
 export class GoogleAdapter implements LLMAdapter {
   constructor(private settings: AutoTaggerSettings, private apiKey: string) {}
 
-  async tag(content: string, context: RegistryContext, existingTags: string[], title?: string): Promise<LLMResponse> {
-    const allowNew = this.settings.newTagsPolicy === "allow-suggestions";
+  async tag(request: LLMTagRequest): Promise<LLMResponse> {
     const systemPrompt = buildSystemPrompt(
       this.settings.systemPrompt,
-      context,
-      allowNew,
-      this.settings.newTagsNamespace
+      request.tags,
+      request.allowNewTags,
+      request.newTagsNamespace,
+      request.ambiguities.length > 0
     );
-    const userMessage = buildUserMessage(content, this.settings.maxInputTokens, existingTags, title);
+    const userMessage = buildUserMessage(
+      request.body,
+      request.title,
+      this.settings.maxInputTokens,
+      request.existingTags,
+      request.detectedEntities,
+      request.ambiguities
+    );
 
     const model = this.settings.modelName || "gemini-1.5-flash";
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`;

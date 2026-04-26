@@ -302,6 +302,25 @@ export class AutoTaggerSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("Entity alias strict-case minimum length")
+      .setDesc(
+        "Aliases shorter than this many characters require an exact case-sensitive match in the note text before they are auto-linked. " +
+        "Protects short aliases like \"Anto\" or \"John\" from matching lowercase occurrences. Set to 0 to disable."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("5")
+          .setValue(String(this.plugin.settings.entityAliasStrictCaseMinLength))
+          .onChange(async (value) => {
+            const parsed = parseInt(value, 10);
+            if (!isNaN(parsed) && parsed >= 0) {
+              this.plugin.settings.entityAliasStrictCaseMinLength = parsed;
+              await this.plugin.saveSettings();
+            }
+          })
+      );
   }
 
   private renderMtimeSection(): void {

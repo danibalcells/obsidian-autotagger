@@ -54,7 +54,9 @@ function buildEntities(): EntityEntry[] {
       const canonicalName = path.basename(filePath, ".md");
 
       const aliases: string[] = [];
-      const rawAliases = frontmatter["aliases"] ?? frontmatter["alias"];
+      const rawAliases =
+        frontmatter["aliases"] ?? frontmatter["Aliases"] ??
+        frontmatter["alias"]   ?? frontmatter["Alias"];
       if (Array.isArray(rawAliases)) {
         aliases.push(
           ...rawAliases.filter((a: unknown): a is string => typeof a === "string")

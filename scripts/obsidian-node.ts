@@ -1,7 +1,20 @@
 /**
- * Node.js shim for Obsidian's requestUrl, used by eval scripts.
- * Provides the same interface as the Obsidian API but uses native fetch.
+ * Node.js shim for Obsidian's browser APIs, used by eval scripts.
+ * Provides requestUrl via native fetch. Other Obsidian types are stubbed for
+ * TypeScript compilation only — they are never called at runtime from scripts.
  */
+
+// ─── Type stubs (compile-time only) ──────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type App = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type TFile = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type TAbstractFile = any;
+export const Platform = { isDesktopApp: false, isMobileApp: false };
+
+// ─── requestUrl ───────────────────────────────────────────────────────────────
 
 export interface RequestUrlParam {
   url: string;

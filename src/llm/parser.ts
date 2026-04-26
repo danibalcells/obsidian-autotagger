@@ -1,11 +1,10 @@
 import type { LLMResponse } from "../types";
 
 const EMPTY: LLMResponse = {
-  people: [],
-  organizations: [],
-  places: [],
   tags: [],
   new_tags: [],
+  disambiguations: [],
+  extra_candidates: { people: [], organizations: [], places: [] },
 };
 
 export function parseLLMResponse(text: string): LLMResponse {
@@ -14,15 +13,32 @@ export function parseLLMResponse(text: string): LLMResponse {
     const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     const jsonText = fenceMatch ? fenceMatch[1] : raw;
     const json = JSON.parse(jsonText);
+
+    const disambiguations: LLMResponse["disambiguations"] = [];
+    if (Array.isArray(json.disambiguations)) {
+      for (const d of json.disambiguations) {
+        if (typeof d === "object" && d !== null && typeof d.surface === "string") {
+          disambiguations.push({
+            surface: d.surface,
+            chosen: typeof d.chosen === "string" ? d.chosen : null,
+          });
+        }
+      }
+    }
+
+    const ec = json.extra_candidates ?? {};
     return {
-      people: toStringArray(json.people),
-      organizations: toStringArray(json.organizations),
-      places: toStringArray(json.places),
       tags: toStringArray(json.tags),
       new_tags: toStringArray(json.new_tags),
+      disambiguations,
+      extra_candidates: {
+        people: toStringArray(ec.people),
+        organizations: toStringArray(ec.organizations),
+        places: toStringArray(ec.places),
+      },
     };
   } catch {
-    return { ...EMPTY };
+    return { ...EMPTY, extra_candidates: { ...EMPTY.extra_candidates } };
   }
 }
 

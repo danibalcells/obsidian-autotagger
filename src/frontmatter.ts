@@ -1,6 +1,5 @@
 import type { App, TFile } from "obsidian";
-import type { LLMResponse } from "./types";
-import type { EntityRegistry } from "./registry/entity-registry";
+import type { LLMResponse, ResolvedEntity } from "./types";
 
 export interface FrontmatterPatch {
   tags: string[];
@@ -14,7 +13,7 @@ export function applyPatchToFrontmatter(
   frontmatter: Record<string, unknown>,
   patch: FrontmatterPatch,
   allowNewTags: boolean,
-  resolveCanonical: (name: string) => string | null
+  resolveCanonical: (name: string) => string | null = () => null
 ): void {
   mergeTags(frontmatter, patch.tags, allowNewTags ? patch.new_tags : []);
   mergeEntityLinks(frontmatter, "people", patch.people, resolveCanonical);
@@ -25,26 +24,51 @@ export function applyPatchToFrontmatter(
 export async function mergeFrontmatter(
   app: App,
   file: TFile,
-  response: LLMResponse,
-  entityRegistry: EntityRegistry,
+  llmResponse: LLMResponse,
+  resolvedEntities: ResolvedEntity[],
   allowNewTags: boolean
 ): Promise<void> {
+  const people = resolvedEntities
+    .filter((e) => e.type === "person")
+    .map((e) => e.canonical);
+  const organizations = resolvedEntities
+    .filter((e) => e.type === "organization")
+    .map((e) => e.canonical);
+  const places = resolvedEntities
+    .filter((e) => e.type === "place")
+    .map((e) => e.canonical);
+
   const patch: FrontmatterPatch = {
-    tags: response.tags,
-    new_tags: response.new_tags,
-    people: response.people,
-    organizations: response.organizations,
-    places: response.places,
+    tags: llmResponse.tags,
+    new_tags: llmResponse.new_tags,
+    people,
+    organizations,
+    places,
   };
 
-  await app.fileManager.processFrontMatter(file, (frontmatter) => {
-    applyPatchToFrontmatter(
-      frontmatter,
-      patch,
-      allowNewTags,
-      (name) => entityRegistry.resolveCanonicalName(name)
-    );
+  await app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+    applyPatchToFrontmatter(frontmatter, patch, allowNewTags);
   });
+}
+
+/** Splits file content into the YAML frontmatter header and the body. */
+export function splitFrontmatter(content: string): {
+  header: string;
+  body: string;
+} {
+  if (!content.startsWith("---")) return { header: "", body: content };
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return { header: "", body: content };
+  const headerEnd = end + 4; // include closing `---`
+  // consume the newline immediately after closing ---
+  const bodyStart =
+    headerEnd < content.length && content[headerEnd] === "\n"
+      ? headerEnd + 1
+      : headerEnd;
+  return {
+    header: content.slice(0, bodyStart),
+    body: content.slice(bodyStart),
+  };
 }
 
 function mergeTags(
